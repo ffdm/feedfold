@@ -46,7 +46,7 @@ Last updated: 2026-04-14
 
 - [x] 4.1 `ClaudeRanker` calling the Anthropic API
 - [x] 4.2 Interests prompt loaded from config
-- [ ] 4.3 Rating history fed as context
+- [~] 4.3 Rating history fed as context
 - [ ] 4.4 Runtime switch between ranker implementations
 
 ## Bucket list
