@@ -50,7 +50,7 @@ pub struct Ranking {
     pub mode: RankingMode,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum RankingMode {
     #[default]
@@ -77,11 +77,28 @@ pub struct Source {
     pub top_n: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum AdapterType {
     Rss,
     Youtube,
+}
+
+impl AdapterType {
+    pub fn as_canonical_str(self) -> &'static str {
+        match self {
+            AdapterType::Rss => "rss",
+            AdapterType::Youtube => "youtube",
+        }
+    }
+
+    pub fn from_canonical_str(s: &str) -> Option<Self> {
+        match s {
+            "rss" => Some(AdapterType::Rss),
+            "youtube" => Some(AdapterType::Youtube),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
