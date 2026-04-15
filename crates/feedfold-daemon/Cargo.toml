@@ -15,6 +15,7 @@ path = "src/main.rs"
 feedfold-core     = { workspace = true }
 feedfold-adapters = { workspace = true }
 anyhow            = { workspace = true }
+chrono            = { workspace = true }
 tokio             = { workspace = true }
 tracing           = { workspace = true }
 tracing-subscriber = { workspace = true }

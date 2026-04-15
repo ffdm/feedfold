@@ -866,6 +866,7 @@ name = "feedfold-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "feedfold-adapters",
  "feedfold-core",
  "tokio",

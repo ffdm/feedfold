@@ -17,7 +17,7 @@ mode = "recency"
 
 [ai]
 # Claude API key is read from the ANTHROPIC_API_KEY environment variable,
-# never from this file. Only used when ranking.mode = "claude".
+# never from this file. Only used when the effective ranking mode is "claude".
 interests = """
 I care about systems papers, Rust, and long-form essays on tools.
 Skip product launches and crypto content.
