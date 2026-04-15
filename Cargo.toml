@@ -46,6 +46,9 @@ rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 # Paths
 directories = "5"
 
+# CLI arg parsing
+clap = { version = "4", features = ["derive"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
