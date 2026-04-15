@@ -12,7 +12,7 @@ Last updated: 2026-04-15
 
 - [x] 0.1 Initial repo scaffolding, docs, and license
 - [x] 0.2 Cargo workspace with three placeholder crates
-- [~] 0.3 Config loader: TOML file into a typed `Config` struct via serde
+- [x] 0.3 Config loader: TOML file into a typed `Config` struct via serde
 - [ ] 0.4 SQLite storage layer: schema, migrations, typed accessors
 - [ ] 0.5 `feedfold add <url>` CLI: fetch, parse via `feed-rs`, print entries
 

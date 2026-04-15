@@ -8,3 +8,7 @@ repository.workspace = true
 description = "Core library for feedfold: data model, storage, source adapters, and ranker."
 
 [dependencies]
+serde       = { workspace = true }
+toml        = { workspace = true }
+thiserror   = { workspace = true }
+directories = { workspace = true }

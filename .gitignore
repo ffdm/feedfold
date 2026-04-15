@@ -19,3 +19,6 @@
 .idea/
 *.swp
 *.swo
+
+# Local learning walkthroughs — personal notes, not project docs
+/walkthroughs/
