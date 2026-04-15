@@ -287,6 +287,28 @@ impl Storage {
         Ok(inserted)
     }
 
+    pub fn apply_ranking(
+        &mut self,
+        source_id: i64,
+        scores: &[crate::ranker::Score],
+        top_n: usize,
+    ) -> Result<(), StorageError> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE entries SET displayed_in_top_n = 0, score = NULL WHERE source_id = ?1",
+            [source_id],
+        )?;
+        for (rank, score) in scores.iter().enumerate() {
+            let in_top_n = rank < top_n;
+            tx.execute(
+                "UPDATE entries SET score = ?1, displayed_in_top_n = ?2 WHERE id = ?3",
+                params![score.value, in_top_n, score.entry_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_entries_for_source(&self, source_id: i64) -> Result<Vec<Entry>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_id, external_id, title, summary, url, thumbnail_url, \
@@ -424,5 +446,42 @@ mod tests {
         assert_eq!(listed.len(), 3);
         assert!(listed.iter().all(|e| e.state == EntryState::New));
         assert!(listed.iter().all(|e| !e.displayed_in_top_n));
+    }
+
+    #[test]
+    fn apply_ranking_sets_scores_and_top_n() {
+        use crate::ranker::Score;
+
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        let entries = vec![
+            new_entry(source_id, "a", "Entry A"),
+            new_entry(source_id, "b", "Entry B"),
+            new_entry(source_id, "c", "Entry C"),
+        ];
+        storage.upsert_entries(&entries).unwrap();
+        let db_entries = storage.list_entries_for_source(source_id).unwrap();
+
+        let scores = vec![
+            Score { entry_id: db_entries[0].id, value: 30.0 },
+            Score { entry_id: db_entries[1].id, value: 20.0 },
+            Score { entry_id: db_entries[2].id, value: 10.0 },
+        ];
+        storage.apply_ranking(source_id, &scores, 2).unwrap();
+
+        let after = storage.list_entries_for_source(source_id).unwrap();
+        let a = after.iter().find(|e| e.external_id == "a").unwrap();
+        let b = after.iter().find(|e| e.external_id == "b").unwrap();
+        let c = after.iter().find(|e| e.external_id == "c").unwrap();
+
+        assert_eq!(a.score, Some(30.0));
+        assert_eq!(b.score, Some(20.0));
+        assert_eq!(c.score, Some(10.0));
+        assert!(a.displayed_in_top_n);
+        assert!(b.displayed_in_top_n);
+        assert!(!c.displayed_in_top_n);
     }
 }

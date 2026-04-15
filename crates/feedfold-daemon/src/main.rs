@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use feedfold_adapters::RssAdapter;
 use feedfold_core::adapter::SourceAdapter;
 use feedfold_core::config::{AdapterType, Config};
+use feedfold_core::ranker::{RankContext, Ranker, RecencyRanker};
 use feedfold_core::storage::Storage;
 use tracing::{error, info, warn};
 
@@ -38,8 +39,10 @@ async fn main() -> Result<()> {
     info!("Database: {}", db_path.display());
 
     let adapter = RssAdapter::new();
+    let ranker = RecencyRanker;
+    let default_top_n = config.general.default_top_n;
 
-    poll_all(&mut storage, &adapter).await;
+    poll_all(&mut storage, &adapter, &ranker, default_top_n).await;
 
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await;
@@ -47,7 +50,7 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                poll_all(&mut storage, &adapter).await;
+                poll_all(&mut storage, &adapter, &ranker, default_top_n).await;
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("Shutting down");
@@ -59,7 +62,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn poll_all(storage: &mut Storage, adapter: &RssAdapter) {
+async fn poll_all(
+    storage: &mut Storage,
+    adapter: &RssAdapter,
+    ranker: &impl Ranker,
+    default_top_n: u32,
+) {
     let sources = match storage.list_sources() {
         Ok(s) => s,
         Err(e) => {
@@ -98,11 +106,26 @@ async fn poll_all(storage: &mut Storage, adapter: &RssAdapter) {
                     }
                     Err(e) => {
                         error!("{}: upsert failed: {e}", source.name);
+                        continue;
                     }
                 }
             }
             Err(e) => {
                 error!("{}: fetch failed: {e}", source.name);
+                continue;
+            }
+        }
+
+        let top_n = source.top_n_override.unwrap_or(default_top_n) as usize;
+        match storage.list_entries_for_source(source.id) {
+            Ok(entries) => {
+                let scores = ranker.rank(&entries, &RankContext { top_n });
+                if let Err(e) = storage.apply_ranking(source.id, &scores, top_n) {
+                    error!("{}: ranking update failed: {e}", source.name);
+                }
+            }
+            Err(e) => {
+                error!("{}: failed to load entries for ranking: {e}", source.name);
             }
         }
     }
