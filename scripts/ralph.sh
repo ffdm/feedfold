@@ -35,7 +35,7 @@ if [[ "$AGENT" == "claude" ]]; then
         agent_cmd+=(--model "$MODEL")
     fi
 elif [[ "$AGENT" == "gemini" ]]; then
-    agent_cmd=(gemini)
+    agent_cmd=(gemini -y)
     if [[ -n "$MODEL" ]]; then
         agent_cmd+=(--model "$MODEL")
     fi
