@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Ralph loop for feedfold.
 #
-# Runs Claude Code repeatedly in non-interactive mode. Each iteration
+# Runs an AI agent repeatedly in non-interactive mode. Each iteration
 # reads scripts/ralph.md as its prompt, picks the next unfinished
 # phase from docs/TASKS.md, implements it, commits, and pushes.
 #
 # Usage:
 #   scripts/ralph.sh              # up to 10 iterations
 #   scripts/ralph.sh 3            # up to 3 iterations
+#   AGENT=gemini scripts/ralph.sh # pin a specific agent (claude, gemini, codex)
 #   MODEL=opus scripts/ralph.sh   # pin a specific model
 #
 # Stop the loop any time with Ctrl-C.
@@ -19,6 +20,7 @@ cd "$(dirname "$0")/.."
 PROMPT_FILE="scripts/ralph.md"
 MAX_ITERS="${1:-10}"
 LOG_DIR=".ralph"
+AGENT="${AGENT:-claude}"
 MODEL="${MODEL:-}"
 
 if [[ ! -f "$PROMPT_FILE" ]]; then
@@ -26,8 +28,28 @@ if [[ ! -f "$PROMPT_FILE" ]]; then
     exit 1
 fi
 
-if ! command -v claude >/dev/null 2>&1; then
-    echo "[ralph] claude CLI not on PATH" >&2
+agent_cmd=()
+if [[ "$AGENT" == "claude" ]]; then
+    agent_cmd=(claude -p --dangerously-skip-permissions)
+    if [[ -n "$MODEL" ]]; then
+        agent_cmd+=(--model "$MODEL")
+    fi
+elif [[ "$AGENT" == "gemini" ]]; then
+    agent_cmd=(gemini)
+    if [[ -n "$MODEL" ]]; then
+        agent_cmd+=(--model "$MODEL")
+    fi
+elif [[ "$AGENT" == "codex" ]]; then
+    agent_cmd=(codex)
+    if [[ -n "$MODEL" ]]; then
+        agent_cmd+=(--model "$MODEL")
+    fi
+else
+    agent_cmd=("$AGENT")
+fi
+
+if ! command -v "${agent_cmd[0]}" >/dev/null 2>&1; then
+    echo "[ralph] ${agent_cmd[0]} CLI not on PATH" >&2
     exit 1
 fi
 
@@ -49,11 +71,6 @@ has_pending_phase_task() {
     ' docs/TASKS.md
 }
 
-claude_args=(-p --dangerously-skip-permissions)
-if [[ -n "$MODEL" ]]; then
-    claude_args+=(--model "$MODEL")
-fi
-
 for i in $(seq 1 "$MAX_ITERS"); do
     if ! has_pending_phase_task; then
         echo "[ralph] no pending phase tasks remain; stopping."
@@ -70,8 +87,8 @@ for i in $(seq 1 "$MAX_ITERS"); do
         /^[[:space:]]*-[[:space:]]*\[[ ~]\]/ { print "  " $0; found = 1; exit }
     ' docs/TASKS.md
 
-    if ! claude "${claude_args[@]}" < "$PROMPT_FILE" 2>&1 | tee "$log"; then
-        echo "[ralph] claude exited non-zero; see $log" >&2
+    if ! "${agent_cmd[@]}" < "$PROMPT_FILE" 2>&1 | tee "$log"; then
+        echo "[ralph] agent exited non-zero; see $log" >&2
         exit 1
     fi
 

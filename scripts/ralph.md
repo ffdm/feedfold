@@ -139,7 +139,7 @@ Reread this section each run.
 
 ### 4.1 Commit authorship
 
-**Never** add `Co-Authored-By: Claude` (or any other Claude trailer)
+**Never** add `Co-Authored-By: AI` (or any other AI trailer)
 to commit messages. Commits go under the user's identity only.
 
 ### 4.2 No em dashes, anywhere
@@ -238,3 +238,4 @@ understand), do **not** fake it. Leave the task at `[~]`, commit any
 partial progress under a `Start X.Y: WIP <reason>` commit so the next
 run can pick it up, print a clear one-paragraph explanation of what
 blocked you, and exit. A human will intervene.
+ene.
