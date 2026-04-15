@@ -37,7 +37,7 @@ Last updated: 2026-04-14
 ## Phase 3: Ratings, overflow, and search
 
 - [x] 3.1 1–5 star rating keybind and storage
-- [ ] 3.2 "Viewed" view with today's counter
+- [~] 3.2 "Viewed" view with today's counter
 - [ ] 3.3 "Overflow" view for unviewed non-top-N entries
 - [ ] 3.4 Starring
 - [ ] 3.5 SQLite FTS5 search over title and summary
