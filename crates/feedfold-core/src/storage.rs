@@ -428,6 +428,18 @@ impl Storage {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn list_overflow_entries(&self) -> Result<Vec<Entry>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_id, external_id, title, summary, url, thumbnail_url, \
+                    author, published_at, fetched_at, state, rating, score, \
+                    displayed_in_top_n \
+             FROM entries WHERE state = ?1 AND displayed_in_top_n = 0 \
+             ORDER BY score DESC, published_at DESC, fetched_at DESC",
+        )?;
+        let rows = stmt.query_map([EntryState::New], row_to_entry)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn list_entries_for_source(&self, source_id: i64) -> Result<Vec<Entry>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_id, external_id, title, summary, url, thumbnail_url, \
@@ -503,6 +515,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn new_source(name: &str, url: &str) -> NewSource {
         NewSource {
@@ -912,5 +925,109 @@ mod tests {
         let viewed_entries = storage.list_viewed_entries().unwrap();
         assert_eq!(viewed_entries.len(), 1);
         assert_eq!(viewed_entries[0].external_id, "viewed");
+    }
+
+    #[test]
+    fn list_overflow_entries_returns_only_new_entries_outside_top_n() {
+        use crate::ranker::Score;
+
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        storage
+            .upsert_entries(&[
+                new_entry(source_id, "top", "Top Entry"),
+                new_entry(source_id, "overflow", "Overflow Entry"),
+                new_entry(source_id, "viewed", "Viewed Entry"),
+            ])
+            .unwrap();
+        let entries = storage.list_entries_for_source(source_id).unwrap();
+        let top = entries.iter().find(|entry| entry.external_id == "top").unwrap();
+        let overflow = entries
+            .iter()
+            .find(|entry| entry.external_id == "overflow")
+            .unwrap();
+        let viewed = entries
+            .iter()
+            .find(|entry| entry.external_id == "viewed")
+            .unwrap();
+
+        storage
+            .apply_ranking(
+                source_id,
+                &[
+                    Score {
+                        entry_id: top.id,
+                        value: 30.0,
+                    },
+                    Score {
+                        entry_id: overflow.id,
+                        value: 20.0,
+                    },
+                    Score {
+                        entry_id: viewed.id,
+                        value: 10.0,
+                    },
+                ],
+                1,
+            )
+            .unwrap();
+        storage.record_entry_view(viewed.id).unwrap();
+
+        let overflow_entries = storage.list_overflow_entries().unwrap();
+        assert_eq!(overflow_entries.len(), 1);
+        assert_eq!(overflow_entries[0].external_id, "overflow");
+        assert_eq!(overflow_entries[0].state, EntryState::New);
+        assert!(!overflow_entries[0].displayed_in_top_n);
+    }
+
+    #[test]
+    fn list_overflow_entries_orders_by_score_then_date() {
+        use crate::ranker::Score;
+
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        let mut first = new_entry(source_id, "older-higher", "Older Higher");
+        first.published_at = Some(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single().unwrap());
+        let mut second = new_entry(source_id, "newer-lower", "Newer Lower");
+        second.published_at = Some(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).single().unwrap());
+
+        storage.upsert_entries(&[first, second]).unwrap();
+        let entries = storage.list_entries_for_source(source_id).unwrap();
+        let older_higher = entries
+            .iter()
+            .find(|entry| entry.external_id == "older-higher")
+            .unwrap();
+        let newer_lower = entries
+            .iter()
+            .find(|entry| entry.external_id == "newer-lower")
+            .unwrap();
+
+        storage
+            .apply_ranking(
+                source_id,
+                &[
+                    Score {
+                        entry_id: older_higher.id,
+                        value: 50.0,
+                    },
+                    Score {
+                        entry_id: newer_lower.id,
+                        value: 10.0,
+                    },
+                ],
+                0,
+            )
+            .unwrap();
+
+        let overflow_entries = storage.list_overflow_entries().unwrap();
+        assert_eq!(overflow_entries.len(), 2);
+        assert_eq!(overflow_entries[0].external_id, "older-higher");
+        assert_eq!(overflow_entries[1].external_id, "newer-lower");
     }
 }

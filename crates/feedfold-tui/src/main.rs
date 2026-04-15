@@ -60,6 +60,7 @@ enum ThumbnailMode {
 enum ActiveView {
     Home,
     Viewed,
+    Overflow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +191,7 @@ impl App {
         match self.active_view {
             ActiveView::Home => "Home".to_string(),
             ActiveView::Viewed => format!("Viewed (today: {})", self.viewed_today_count),
+            ActiveView::Overflow => "Overflow".to_string(),
         }
     }
 
@@ -310,6 +312,11 @@ fn run_app(
                         refresh_view(app, storage)?;
                         needs_redraw = true;
                     }
+                    KeyCode::Char('o') => {
+                        app.set_view(ActiveView::Overflow);
+                        refresh_view(app, storage)?;
+                        needs_redraw = true;
+                    }
                     KeyCode::Char('r') => {
                         refresh_view(app, storage)?;
                         needs_redraw = true;
@@ -344,7 +351,8 @@ fn run_app(
                                 }
                             }
 
-                            if app.active_view == ActiveView::Viewed {
+                            if matches!(app.active_view, ActiveView::Viewed | ActiveView::Overflow)
+                            {
                                 refresh_view(app, storage)?;
                             }
 
@@ -362,6 +370,7 @@ fn load_entries_for_view(storage: &Storage, active_view: ActiveView) -> Result<V
     match active_view {
         ActiveView::Home => Ok(storage.list_top_n_entries()?),
         ActiveView::Viewed => Ok(storage.list_viewed_entries()?),
+        ActiveView::Overflow => Ok(storage.list_overflow_entries()?),
     }
 }
 
@@ -780,5 +789,73 @@ mod tests {
         assert_eq!(app.entries.len(), 1);
         assert_eq!(app.entries[0].external_id, "viewed");
         assert_eq!(app.viewed_today_count, 1);
+    }
+
+    #[test]
+    fn overflow_title_is_static() {
+        let mut app = App::new(
+            vec![sample_entry()],
+            ThumbnailMode::TextFallback,
+            PathBuf::new(),
+        );
+        app.set_view(ActiveView::Overflow);
+
+        assert_eq!(app.list_title(), "Overflow");
+    }
+
+    #[test]
+    fn refresh_view_loads_only_overflow_entries() {
+        use feedfold_core::ranker::Score;
+
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage.insert_source(&sample_source()).unwrap();
+
+        storage
+            .upsert_entries(&[
+                sample_new_entry(source_id, "top", "Top Entry"),
+                sample_new_entry(source_id, "overflow", "Overflow Entry"),
+                sample_new_entry(source_id, "viewed", "Viewed Entry"),
+            ])
+            .unwrap();
+        let entries = storage.list_entries_for_source(source_id).unwrap();
+        let top = entries.iter().find(|entry| entry.external_id == "top").unwrap();
+        let overflow = entries
+            .iter()
+            .find(|entry| entry.external_id == "overflow")
+            .unwrap();
+        let viewed = entries
+            .iter()
+            .find(|entry| entry.external_id == "viewed")
+            .unwrap();
+
+        storage
+            .apply_ranking(
+                source_id,
+                &[
+                    Score {
+                        entry_id: top.id,
+                        value: 30.0,
+                    },
+                    Score {
+                        entry_id: overflow.id,
+                        value: 20.0,
+                    },
+                    Score {
+                        entry_id: viewed.id,
+                        value: 10.0,
+                    },
+                ],
+                1,
+            )
+            .unwrap();
+        storage.record_entry_view(viewed.id).unwrap();
+
+        let mut app = App::new(Vec::new(), ThumbnailMode::TextFallback, PathBuf::new());
+        app.set_view(ActiveView::Overflow);
+
+        refresh_view(&mut app, &storage).unwrap();
+
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].external_id, "overflow");
     }
 }
