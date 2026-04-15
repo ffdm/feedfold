@@ -131,6 +131,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('r') => {
+                        app.entries = storage.list_top_n_entries()?;
+                        if let Some(i) = app.state.selected() {
+                            if app.entries.is_empty() {
+                                app.state.select(None);
+                            } else if i >= app.entries.len() {
+                                app.state.select(Some(app.entries.len() - 1));
+                            }
+                        }
+                    }
                     KeyCode::Char('j') | KeyCode::Down => app.next(),
                     KeyCode::Char('k') | KeyCode::Up => app.previous(),
                     KeyCode::Enter => {
