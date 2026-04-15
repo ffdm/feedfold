@@ -117,6 +117,8 @@ struct App {
     entries: Vec<Entry>,
     viewed_today_count: usize,
     state: ListState,
+    search_query: Option<String>,
+    search_editing: bool,
     thumbnail_mode: ThumbnailMode,
     thumbnail_dir: PathBuf,
     thumbnail_cache: HashMap<String, ThumbnailStatus>,
@@ -136,6 +138,8 @@ impl App {
             entries,
             viewed_today_count: 0,
             state,
+            search_query: None,
+            search_editing: false,
             thumbnail_mode,
             thumbnail_dir,
             thumbnail_cache: HashMap::new(),
@@ -188,6 +192,16 @@ impl App {
     }
 
     fn list_title(&self) -> String {
+        if let Some(query) = self.search_query.as_deref() {
+            if self.search_editing {
+                return format!("Search: {query}_");
+            }
+
+            if !query.trim().is_empty() {
+                return format!("Search: {query}");
+            }
+        }
+
         match self.active_view {
             ActiveView::Home => "Home".to_string(),
             ActiveView::Viewed => format!("Viewed (today: {})", self.viewed_today_count),
@@ -215,6 +229,51 @@ impl App {
     fn selected_thumbnail_status(&self) -> Option<&ThumbnailStatus> {
         let url = self.selected_entry()?.thumbnail_url.as_ref()?;
         self.thumbnail_cache.get(url)
+    }
+
+    fn begin_search(&mut self) {
+        self.search_query.get_or_insert_with(String::new);
+        self.search_editing = true;
+    }
+
+    fn finish_search(&mut self) {
+        if self
+            .search_query
+            .as_deref()
+            .is_some_and(|query| query.trim().is_empty())
+        {
+            self.search_query = None;
+        }
+        self.search_editing = false;
+    }
+
+    fn clear_search(&mut self) {
+        self.search_query = None;
+        self.search_editing = false;
+    }
+
+    fn push_search_char(&mut self, c: char) {
+        self.search_query.get_or_insert_with(String::new).push(c);
+    }
+
+    fn pop_search_char(&mut self) -> bool {
+        self.search_query
+            .as_mut()
+            .is_some_and(|query| query.pop().is_some())
+    }
+
+    fn search_query(&self) -> Option<&str> {
+        self.search_query.as_deref()
+    }
+
+    fn is_search_active(&self) -> bool {
+        self.search_query
+            .as_deref()
+            .is_some_and(|query| !query.trim().is_empty())
+    }
+
+    fn is_search_editing(&self) -> bool {
+        self.search_editing
     }
 
     fn process_thumbnail_updates(&mut self) -> bool {
@@ -300,19 +359,59 @@ fn run_app(
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if app.is_search_editing() {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Enter => {
+                            let had_query = app.search_query().is_some();
+                            app.finish_search();
+                            if had_query && !app.is_search_active() {
+                                refresh_view(app, storage)?;
+                            }
+                            needs_redraw = true;
+                        }
+                        KeyCode::Backspace => {
+                            if app.pop_search_char() {
+                                refresh_view(app, storage)?;
+                                needs_redraw = true;
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            app.push_search_char(c);
+                            refresh_view(app, storage)?;
+                            needs_redraw = true;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('/') => {
+                        app.begin_search();
+                        needs_redraw = true;
+                    }
+                    KeyCode::Esc => {
+                        if app.is_search_active() {
+                            app.clear_search();
+                            refresh_view(app, storage)?;
+                            needs_redraw = true;
+                        }
+                    }
                     KeyCode::Char('h') => {
+                        app.clear_search();
                         app.set_view(ActiveView::Home);
                         refresh_view(app, storage)?;
                         needs_redraw = true;
                     }
                     KeyCode::Char('v') => {
+                        app.clear_search();
                         app.set_view(ActiveView::Viewed);
                         refresh_view(app, storage)?;
                         needs_redraw = true;
                     }
                     KeyCode::Char('o') => {
+                        app.clear_search();
                         app.set_view(ActiveView::Overflow);
                         refresh_view(app, storage)?;
                         needs_redraw = true;
@@ -356,7 +455,11 @@ fn run_app(
                                 }
                             }
 
-                            if matches!(app.active_view, ActiveView::Viewed | ActiveView::Overflow)
+                            if !app.is_search_active()
+                                && matches!(
+                                    app.active_view,
+                                    ActiveView::Viewed | ActiveView::Overflow
+                                )
                             {
                                 refresh_view(app, storage)?;
                             }
@@ -371,7 +474,15 @@ fn run_app(
     }
 }
 
-fn load_entries_for_view(storage: &Storage, active_view: ActiveView) -> Result<Vec<Entry>> {
+fn load_entries_for_view(
+    storage: &Storage,
+    active_view: ActiveView,
+    search_query: Option<&str>,
+) -> Result<Vec<Entry>> {
+    if let Some(query) = search_query.filter(|query| !query.trim().is_empty()) {
+        return Ok(storage.search_entries(query)?);
+    }
+
     match active_view {
         ActiveView::Home => Ok(storage.list_top_n_entries()?),
         ActiveView::Viewed => Ok(storage.list_viewed_entries()?),
@@ -393,7 +504,7 @@ fn toggle_star_for_selected(app: &mut App, storage: &mut Storage) -> Result<bool
 
     storage.set_entry_state(entry_id, next_state)?;
 
-    if app.active_view == ActiveView::Overflow {
+    if app.active_view == ActiveView::Overflow && !app.is_search_active() {
         refresh_view(app, storage)?;
     } else if let Some(entry) = app.selected_entry_mut() {
         entry.state = next_state;
@@ -403,7 +514,11 @@ fn toggle_star_for_selected(app: &mut App, storage: &mut Storage) -> Result<bool
 }
 
 fn refresh_view(app: &mut App, storage: &Storage) -> Result<()> {
-    app.replace_entries(load_entries_for_view(storage, app.active_view)?);
+    app.replace_entries(load_entries_for_view(
+        storage,
+        app.active_view,
+        app.search_query(),
+    )?);
     if app.active_view == ActiveView::Viewed {
         app.viewed_today_count = storage.count_entries_viewed_today()?;
     }
@@ -806,6 +921,65 @@ mod tests {
         app.viewed_today_count = 3;
 
         assert_eq!(app.list_title(), "Viewed (today: 3)");
+    }
+
+    #[test]
+    fn search_title_tracks_editing_state() {
+        let mut app = App::new(
+            vec![sample_entry()],
+            ThumbnailMode::TextFallback,
+            PathBuf::new(),
+        );
+
+        app.begin_search();
+        assert_eq!(app.list_title(), "Search: _");
+
+        for c in "rust".chars() {
+            app.push_search_char(c);
+        }
+        assert_eq!(app.list_title(), "Search: rust_");
+
+        app.finish_search();
+        assert_eq!(app.list_title(), "Search: rust");
+    }
+
+    #[test]
+    fn refresh_view_uses_search_results_over_active_view() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage.insert_source(&sample_source()).unwrap();
+
+        storage
+            .upsert_entries(&[
+                sample_new_entry(source_id, "rust", "Rust notes"),
+                NewEntry {
+                    source_id,
+                    external_id: "sqlite".to_string(),
+                    title: "Database internals".to_string(),
+                    summary: Some("SQLite FTS5 query planner".to_string()),
+                    url: "https://example.com/posts/sqlite".to_string(),
+                    thumbnail_url: None,
+                    author: Some("Example Feed".to_string()),
+                    published_at: Some(Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).single().unwrap()),
+                    enrichments: HashMap::new(),
+                },
+            ])
+            .unwrap();
+
+        let mut app = App::new(Vec::new(), ThumbnailMode::TextFallback, PathBuf::new());
+        app.begin_search();
+        for c in "FTS5".chars() {
+            app.push_search_char(c);
+        }
+
+        refresh_view(&mut app, &storage).unwrap();
+
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].external_id, "sqlite");
+
+        app.clear_search();
+        refresh_view(&mut app, &storage).unwrap();
+
+        assert!(app.entries.is_empty());
     }
 
     #[test]

@@ -185,6 +185,35 @@ CREATE TABLE IF NOT EXISTS daily_views (
 );
 "#;
 
+const SEARCH_SCHEMA_V1: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+    title,
+    summary,
+    content='entries',
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS entries_fts_after_insert
+AFTER INSERT ON entries BEGIN
+    INSERT INTO entries_fts(rowid, title, summary)
+    VALUES (new.id, new.title, coalesce(new.summary, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS entries_fts_after_delete
+AFTER DELETE ON entries BEGIN
+    INSERT INTO entries_fts(entries_fts, rowid, title, summary)
+    VALUES ('delete', old.id, old.title, coalesce(old.summary, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS entries_fts_after_update
+AFTER UPDATE OF title, summary ON entries BEGIN
+    INSERT INTO entries_fts(entries_fts, rowid, title, summary)
+    VALUES ('delete', old.id, old.title, coalesce(old.summary, ''));
+    INSERT INTO entries_fts(rowid, title, summary)
+    VALUES (new.id, new.title, coalesce(new.summary, ''));
+END;
+"#;
+
 pub struct Storage {
     conn: Connection,
 }
@@ -227,6 +256,16 @@ impl Storage {
         conn.execute_batch(SCHEMA_V1)
             .map_err(|source| StorageError::Migration {
                 step: "schema v1",
+                source,
+            })?;
+        conn.execute_batch(SEARCH_SCHEMA_V1)
+            .map_err(|source| StorageError::Migration {
+                step: "search schema v1",
+                source,
+            })?;
+        conn.execute("INSERT INTO entries_fts(entries_fts) VALUES('rebuild')", [])
+            .map_err(|source| StorageError::Migration {
+                step: "search index rebuild",
                 source,
             })?;
         Ok(Self { conn })
@@ -452,6 +491,25 @@ impl Storage {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn search_entries(&self, query: &str) -> Result<Vec<Entry>, StorageError> {
+        let Some(match_query) = build_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+
+        let mut stmt = self.conn.prepare(
+            "SELECT entries.id, entries.source_id, entries.external_id, entries.title, \
+                    entries.summary, entries.url, entries.thumbnail_url, entries.author, \
+                    entries.published_at, entries.fetched_at, entries.state, entries.rating, \
+                    entries.score, entries.displayed_in_top_n \
+             FROM entries_fts \
+             INNER JOIN entries ON entries.id = entries_fts.rowid \
+             WHERE entries_fts MATCH ?1 \
+             ORDER BY bm25(entries_fts), entries.published_at DESC, entries.fetched_at DESC",
+        )?;
+        let rows = stmt.query_map([match_query], row_to_entry)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     fn record_entry_view_at(
         &mut self,
         id: i64,
@@ -512,6 +570,21 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
     })
 }
 
+fn build_fts_query(query: &str) -> Option<String> {
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|token| token.replace('"', "\"\""))
+        .filter(|token| !token.is_empty())
+        .map(|token| format!("\"{token}\""))
+        .collect();
+
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" AND "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,6 +605,25 @@ mod tests {
             external_id: external_id.into(),
             title: title.into(),
             summary: None,
+            url: format!("https://example.com/{external_id}"),
+            thumbnail_url: None,
+            author: None,
+            published_at: None,
+            enrichments: HashMap::new(),
+        }
+    }
+
+    fn new_entry_with_summary(
+        source_id: i64,
+        external_id: &str,
+        title: &str,
+        summary: Option<&str>,
+    ) -> NewEntry {
+        NewEntry {
+            source_id,
+            external_id: external_id.into(),
+            title: title.into(),
+            summary: summary.map(str::to_string),
             url: format!("https://example.com/{external_id}"),
             thumbnail_url: None,
             author: None,
@@ -1071,5 +1163,73 @@ mod tests {
         assert_eq!(overflow_entries.len(), 2);
         assert_eq!(overflow_entries[0].external_id, "older-higher");
         assert_eq!(overflow_entries[1].external_id, "newer-lower");
+    }
+
+    #[test]
+    fn search_entries_matches_title_and_summary() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        storage
+            .upsert_entries(&[
+                new_entry_with_summary(
+                    source_id,
+                    "rust-book",
+                    "Rust book notes",
+                    Some("Borrow checker deep dive."),
+                ),
+                new_entry_with_summary(
+                    source_id,
+                    "sqlite",
+                    "Database internals",
+                    Some("SQLite FTS5 makes title search fast."),
+                ),
+                new_entry_with_summary(
+                    source_id,
+                    "gardening",
+                    "Garden update",
+                    Some("Tomatoes are thriving."),
+                ),
+            ])
+            .unwrap();
+
+        let title_matches = storage.search_entries("Rust").unwrap();
+        assert_eq!(title_matches.len(), 1);
+        assert_eq!(title_matches[0].external_id, "rust-book");
+
+        let summary_matches = storage.search_entries("FTS5").unwrap();
+        assert_eq!(summary_matches.len(), 1);
+        assert_eq!(summary_matches[0].external_id, "sqlite");
+    }
+
+    #[test]
+    fn search_entries_requires_all_query_terms() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        storage
+            .upsert_entries(&[
+                new_entry_with_summary(
+                    source_id,
+                    "both",
+                    "Rust search",
+                    Some("SQLite FTS5 overview"),
+                ),
+                new_entry_with_summary(
+                    source_id,
+                    "one",
+                    "Rust only",
+                    Some("No database content here."),
+                ),
+            ])
+            .unwrap();
+
+        let matches = storage.search_entries("Rust FTS5").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].external_id, "both");
     }
 }
