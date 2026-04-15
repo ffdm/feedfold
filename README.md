@@ -3,7 +3,9 @@
 A fast, modular terminal RSS reader that caps each source at a configurable
 top-N so you see the few entries that matter, not the firehose.
 
-> Status: early alpha. Under active development. See [docs/TASKS.md](docs/TASKS.md) for what works today.
+> Status: alpha, usable end-to-end. Phases 0 through 4 of the
+> [roadmap](docs/ROADMAP.md) are complete. See
+> [docs/TASKS.md](docs/TASKS.md) for what's next.
 
 ## What it is
 
@@ -25,8 +27,44 @@ stays calm even when you haven't opened it in a week.
 
 ## Quick start
 
-Not yet runnable. See [docs/TASKS.md](docs/TASKS.md) for current progress and
-[docs/ROADMAP.md](docs/ROADMAP.md) for what's coming.
+Prereqs: a recent stable Rust toolchain (`rustup`). macOS or Linux.
+
+```sh
+# 1. Build both binaries (release).
+cargo build --release
+
+# 2. Drop the example config where feedfold looks for it, then edit
+#    your interests / default top_n. Sources can live here too, but
+#    the CLI is easier.
+#      macOS:  ~/Library/Application Support/feedfold/config.toml
+#      Linux:  ~/.config/feedfold/config.toml
+mkdir -p "$HOME/Library/Application Support/feedfold"
+cp config.example.toml "$HOME/Library/Application Support/feedfold/config.toml"
+
+# 3. Add your subscribers.
+#    Option A: bulk import from an OPML file exported by another reader.
+./target/release/feedfold import ~/Downloads/subscriptions.opml
+
+#    Option B: add feeds one at a time.
+./target/release/feedfold add https://simonwillison.net/atom/everything/
+./target/release/feedfold add "https://www.youtube.com/feeds/videos.xml?channel_id=UCsBjURrPoezykLs9EqgamOA"
+
+# 4. Sanity-check what's tracked.
+./target/release/feedfold list
+
+# 5. Start the background daemon in another terminal. It polls on the
+#    schedule from config.toml and ranks each source.
+./target/release/feedfoldd
+
+# 6. Open the reader. Use j/k to move, Enter to open in a browser,
+#    1-5 to rate, s to star, h/v/o to switch views, / to search, q to quit.
+./target/release/feedfold
+```
+
+Optional environment:
+
+- `ANTHROPIC_API_KEY` enables `ranking.mode = "claude"` in the daemon.
+- `YOUTUBE_API_KEY` enables popularity enrichment for YouTube sources.
 
 ## File index
 

@@ -24,10 +24,13 @@ use ratatui::{
 };
 use viuer::KittySupport;
 
-use feedfold_adapters::RssAdapter;
+use feedfold_adapters::{RssAdapter, YoutubeAdapter};
 use feedfold_core::adapter::SourceAdapter;
+use feedfold_core::config::AdapterType;
 use feedfold_core::storage::{Entry, EntryState, NewEntry, NewSource, Storage};
 use feedfold_core::VERSION;
+
+mod opml;
 
 const THUMBNAIL_HEIGHT: u16 = 12;
 
@@ -48,6 +51,13 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Bulk-import subscriptions from an OPML file.
+    Import {
+        /// Path to an OPML file exported from another reader.
+        path: PathBuf,
+    },
+    /// List every source currently tracked in the database.
+    List,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +91,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Add { url, name }) => add_feed(&url, name.as_deref()).await,
+        Some(Command::Import { path }) => import_opml(&path).await,
+        Some(Command::List) => list_sources(),
         None => run_tui().await,
     }
 }
@@ -748,39 +760,66 @@ fn entry_list_title(entry: &Entry) -> String {
 }
 
 async fn add_feed(url: &str, override_name: Option<&str>) -> Result<()> {
-    let adapter = RssAdapter::new();
-    let fetched = adapter
-        .fetch(url)
-        .await
-        .with_context(|| format!("fetching feed at {url}"))?;
+    let db_path = Storage::default_path().context("resolving database path")?;
+    let mut storage = Storage::open(&db_path)
+        .with_context(|| format!("opening database at {}", db_path.display()))?;
+    let outcome = add_feed_with_storage(&mut storage, url, override_name).await?;
+    print_import_outcome(&outcome);
+    Ok(())
+}
+
+fn adapter_for_url(url: &str) -> AdapterType {
+    if opml::looks_like_youtube_feed(url) {
+        AdapterType::Youtube
+    } else {
+        AdapterType::Rss
+    }
+}
+
+async fn fetch_feed_for(kind: AdapterType, url: &str) -> Result<feedfold_core::adapter::FetchedFeed> {
+    match kind {
+        AdapterType::Rss => RssAdapter::new()
+            .fetch(url)
+            .await
+            .with_context(|| format!("fetching feed at {url}")),
+        AdapterType::Youtube => YoutubeAdapter::default()
+            .fetch(url)
+            .await
+            .with_context(|| format!("fetching YouTube feed at {url}")),
+    }
+}
+
+struct ImportOutcome {
+    source_name: String,
+    already_tracked: bool,
+    new_entries: usize,
+    total_entries: usize,
+}
+
+async fn add_feed_with_storage(
+    storage: &mut Storage,
+    url: &str,
+    override_name: Option<&str>,
+) -> Result<ImportOutcome> {
+    let kind = adapter_for_url(url);
+    let fetched = fetch_feed_for(kind, url).await?;
 
     let name = override_name
         .map(str::to_owned)
         .or_else(|| fetched.name.clone())
         .unwrap_or_else(|| url.to_string());
 
-    let db_path = Storage::default_path().context("resolving database path")?;
-    let mut storage = Storage::open(&db_path)
-        .with_context(|| format!("opening database at {}", db_path.display()))?;
-
-    let source_id = match storage.source_by_url(url)? {
-        Some(existing) => {
-            println!(
-                "Source already tracked: {} (id {}). Refreshing entries.",
-                existing.name, existing.id
-            );
-            existing.id
-        }
+    let (source_id, already_tracked, source_name) = match storage.source_by_url(url)? {
+        Some(existing) => (existing.id, true, existing.name),
         None => {
             let new = NewSource {
                 name: name.clone(),
                 url: url.to_string(),
-                adapter: adapter.kind(),
+                adapter: kind,
                 top_n_override: None,
             };
             let id = storage.insert_source(&new)?;
-            println!("Added source: {name} (id {id})");
-            id
+            (id, false, name)
         }
     };
 
@@ -789,13 +828,97 @@ async fn add_feed(url: &str, override_name: Option<&str>) -> Result<()> {
         .into_iter()
         .map(|fe| fe.into_new_entry(source_id))
         .collect();
-
+    let total_entries = new_entries.len();
     let inserted = storage.upsert_entries(&new_entries)?;
-    println!(
-        "Imported {inserted} new entries ({} total in feed).",
-        new_entries.len()
-    );
 
+    Ok(ImportOutcome {
+        source_name,
+        already_tracked,
+        new_entries: inserted,
+        total_entries,
+    })
+}
+
+fn print_import_outcome(outcome: &ImportOutcome) {
+    let ImportOutcome {
+        source_name,
+        already_tracked,
+        new_entries,
+        total_entries,
+    } = outcome;
+    let prefix = if *already_tracked {
+        format!("Refreshed {source_name}")
+    } else {
+        format!("Added {source_name}")
+    };
+    println!("{prefix}: {new_entries} new ({total_entries} in feed)");
+}
+
+async fn import_opml(path: &Path) -> Result<()> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("reading OPML file at {}", path.display()))?;
+    let feeds = opml::parse(&raw).with_context(|| format!("parsing OPML at {}", path.display()))?;
+
+    if feeds.is_empty() {
+        println!("No feed URLs found in {}", path.display());
+        return Ok(());
+    }
+
+    let db_path = Storage::default_path().context("resolving database path")?;
+    let mut storage = Storage::open(&db_path)
+        .with_context(|| format!("opening database at {}", db_path.display()))?;
+
+    println!("Importing {} feed(s) from {}", feeds.len(), path.display());
+    let mut added = 0usize;
+    let mut refreshed = 0usize;
+    let mut failed = 0usize;
+
+    for feed in &feeds {
+        let override_name = feed.title.as_deref();
+        match add_feed_with_storage(&mut storage, &feed.url, override_name).await {
+            Ok(outcome) => {
+                print_import_outcome(&outcome);
+                if outcome.already_tracked {
+                    refreshed += 1;
+                } else {
+                    added += 1;
+                }
+            }
+            Err(err) => {
+                failed += 1;
+                eprintln!("  ! {} ({}): {err:#}", feed.display_name(), feed.url);
+            }
+        }
+    }
+
+    println!(
+        "Import complete: {added} added, {refreshed} refreshed, {failed} failed out of {}.",
+        feeds.len()
+    );
+    Ok(())
+}
+
+fn list_sources() -> Result<()> {
+    let db_path = Storage::default_path().context("resolving database path")?;
+    let storage = Storage::open(&db_path)
+        .with_context(|| format!("opening database at {}", db_path.display()))?;
+    let sources = storage.list_sources().context("listing sources")?;
+
+    if sources.is_empty() {
+        println!("No sources tracked yet. Try `feedfold add <url>` or `feedfold import <opml>`.");
+        return Ok(());
+    }
+
+    println!("{} source(s) tracked:", sources.len());
+    for source in sources {
+        println!(
+            "  [{:>3}] {:<8} {}  ({})",
+            source.id,
+            source.adapter.as_canonical_str(),
+            source.name,
+            source.url,
+        );
+    }
     Ok(())
 }
 

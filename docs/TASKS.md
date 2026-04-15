@@ -6,7 +6,7 @@ commit again.
 
 Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
-Last updated: 2026-04-14
+Last updated: 2026-04-15
 
 ## Phase 0: Foundations
 
@@ -49,11 +49,23 @@ Last updated: 2026-04-14
 - [x] 4.3 Rating history fed as context
 - [x] 4.4 Runtime switch between ranker implementations
 
-## Bucket list
+## Phase 5: Onboarding polish
 
-- [ ] `feedfold daemon install` writing a `launchd` plist
-- [ ] OAuth-based YouTube subscription import
-- [ ] OPML import / export
-- [ ] Source groups and saved filters
-- [ ] Local-model (Ollama) ranker
-- [ ] Semantic search
+- [x] 5.1 `feedfold import <opml>` bulk subscription import
+- [x] 5.2 `feedfold list` source inspector
+- [ ] 5.3 `feedfold remove <id|url>` source removal
+- [ ] 5.4 `feedfold export` OPML export for backup
+- [ ] 5.5 First-run config bootstrap
+
+## Phase 6: Persistent daemon
+
+- [ ] 6.1 `feedfold daemon install` writing a `launchd` plist
+- [ ] 6.2 `feedfold daemon status/start/stop` wrappers
+- [ ] 6.3 Pid file and log rotation
+
+## Phase 7: Deeper integrations
+
+- [ ] 7.1 OAuth-based YouTube subscription import
+- [ ] 7.2 Source groups and saved filters
+- [ ] 7.3 Local-model (Ollama) ranker
+- [ ] 7.4 Semantic search
