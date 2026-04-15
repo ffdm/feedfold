@@ -1,0 +1,41 @@
+# feedfold config. Copy this file to ~/.config/feedfold/config.toml and edit.
+# Never commit your real config.toml — it may contain API keys.
+
+[general]
+# Default number of entries surfaced per source per fetch cycle.
+# Individual sources can override this with their own `top_n` field below.
+default_top_n      = 3
+
+# How often the background daemon polls feeds, in minutes.
+poll_interval_mins = 30
+
+[ranking]
+# "recency"    — newest first. Default. No API needed.
+# "popularity" — sort by engagement. Requires YouTube Data API for YT sources.
+# "claude"     — AI-assisted ranking via the Anthropic API. Phase 4.
+mode = "recency"
+
+[ai]
+# Claude API key is read from the ANTHROPIC_API_KEY environment variable,
+# never from this file. Only used when ranking.mode = "claude".
+interests = """
+I care about systems papers, Rust, and long-form essays on tools.
+Skip product launches and crypto content.
+"""
+
+[youtube]
+# YouTube Data API key is read from the YOUTUBE_API_KEY environment variable,
+# never from this file. Only required if you want popularity sorting on
+# YouTube sources.
+
+# Add as many sources as you like. `adapter` is "rss" or "youtube".
+[[sources]]
+name    = "Simon Willison's Weblog"
+url     = "https://simonwillison.net/atom/everything/"
+adapter = "rss"
+
+[[sources]]
+name    = "Fireship"
+url     = "https://www.youtube.com/feeds/videos.xml?channel_id=UCsBjURrPoezykLs9EqgamOA"
+adapter = "youtube"
+top_n   = 5   # per-source override of default_top_n

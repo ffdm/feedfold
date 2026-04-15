@@ -1,0 +1,21 @@
+/target
+**/*.rs.bk
+
+# Local user config — may contain API keys. Only config.example.toml is tracked.
+/config.toml
+
+# Runtime state
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+/data/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo

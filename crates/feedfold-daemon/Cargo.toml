@@ -1,0 +1,15 @@
+[package]
+name = "feedfold-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Background fetcher daemon for feedfold."
+
+[[bin]]
+name = "feedfoldd"
+path = "src/main.rs"
+
+[dependencies]
+feedfold-core = { workspace = true }

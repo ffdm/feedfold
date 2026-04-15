@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/feedfold-core",
+    "crates/feedfold-daemon",
+    "crates/feedfold-tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Finn Moore <fdm@umich.edu>"]
+repository = "https://github.com/ffdm/feedfold"
+rust-version = "1.75"
+
+[workspace.dependencies]
+feedfold-core = { path = "crates/feedfold-core" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Errors
+anyhow = "1"
+thiserror = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Dates
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP + feed parsing
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+feed-rs = "2"
+
+# Storage
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
+
+# Paths
+directories = "5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

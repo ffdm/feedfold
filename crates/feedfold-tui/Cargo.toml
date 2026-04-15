@@ -1,0 +1,15 @@
+[package]
+name = "feedfold-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Terminal UI reader for feedfold."
+
+[[bin]]
+name = "feedfold"
+path = "src/main.rs"
+
+[dependencies]
+feedfold-core = { workspace = true }
