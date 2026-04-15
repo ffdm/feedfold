@@ -1,7 +1,7 @@
 # Architecture
 
 This document captures the design decisions behind feedfold. Read it before
-making structural changes — these decisions were made deliberately and should
+making structural changes. These decisions were made deliberately and should
 only be revisited with reason.
 
 ## Core principle: RSS is the universe, YouTube is one adapter
@@ -66,8 +66,8 @@ trait SourceAdapter {
 
 Implementations:
 
-- `RssAdapter` — parses RSS 2.0, RSS 1.0, Atom, and JSON Feed via `feed-rs`.
-- `YoutubeAdapter` — wraps `RssAdapter` for the channel RSS feed, then
+- `RssAdapter`: parses RSS 2.0, RSS 1.0, Atom, and JSON Feed via `feed-rs`.
+- `YoutubeAdapter`: wraps `RssAdapter` for the channel RSS feed, then
   batches `videos.list` calls to YouTube Data API v3 to enrich with view
   counts and duration.
 
@@ -81,13 +81,13 @@ trait Ranker {
 
 Implementations:
 
-- `RecencyRanker` (Phase 1) — pure newest-first.
-- `PopularityRanker` (Phase 2) — uses enrichments such as YouTube views.
-- `ClaudeRanker` (Phase 4) — calls the Anthropic API with titles, summaries,
+- `RecencyRanker` (Phase 1): pure newest-first.
+- `PopularityRanker` (Phase 2): uses enrichments such as YouTube views.
+- `ClaudeRanker` (Phase 4): calls the Anthropic API with titles, summaries,
   the user's interests prompt, and recent 1–5 star ratings.
 
 The ranker is swappable at runtime via config. The TUI and daemon never know
-which implementation is active — they see a ranked list.
+which implementation is active. They see a ranked list.
 
 ## Storage
 

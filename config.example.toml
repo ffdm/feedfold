@@ -1,5 +1,5 @@
 # feedfold config. Copy this file to ~/.config/feedfold/config.toml and edit.
-# Never commit your real config.toml — it may contain API keys.
+# Never commit your real config.toml; it may contain API keys.
 
 [general]
 # Default number of entries surfaced per source per fetch cycle.
@@ -10,9 +10,9 @@ default_top_n      = 3
 poll_interval_mins = 30
 
 [ranking]
-# "recency"    — newest first. Default. No API needed.
-# "popularity" — sort by engagement. Requires YouTube Data API for YT sources.
-# "claude"     — AI-assisted ranking via the Anthropic API. Phase 4.
+# "recency":    newest first. Default. No API needed.
+# "popularity": sort by engagement. Requires YouTube Data API for YT sources.
+# "claude":     AI-assisted ranking via the Anthropic API. Phase 4.
 mode = "recency"
 
 [ai]

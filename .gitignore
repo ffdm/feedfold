@@ -1,7 +1,7 @@
 /target
 **/*.rs.bk
 
-# Local user config — may contain API keys. Only config.example.toml is tracked.
+# Local user config. May contain API keys. Only config.example.toml is tracked.
 /config.toml
 
 # Runtime state

@@ -8,15 +8,15 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 Last updated: 2026-04-15
 
-## Phase 0 — Foundations
+## Phase 0: Foundations
 
 - [x] 0.1 Initial repo scaffolding, docs, and license
 - [x] 0.2 Cargo workspace with three placeholder crates
-- [ ] 0.3 Config loader — TOML file → typed `Config` struct via serde
-- [ ] 0.4 SQLite storage layer — schema, migrations, typed accessors
-- [ ] 0.5 `feedfold add <url>` CLI — fetch, parse via `feed-rs`, print entries
+- [ ] 0.3 Config loader: TOML file into a typed `Config` struct via serde
+- [ ] 0.4 SQLite storage layer: schema, migrations, typed accessors
+- [ ] 0.5 `feedfold add <url>` CLI: fetch, parse via `feed-rs`, print entries
 
-## Phase 1 — Daemon and TUI home view
+## Phase 1: Daemon and TUI home view
 
 - [ ] 1.1 `SourceAdapter` trait in `feedfold-core`
 - [ ] 1.2 `RssAdapter` implementation
@@ -26,7 +26,7 @@ Last updated: 2026-04-15
 - [ ] 1.6 Read / unread state wired through UI and storage
 - [ ] 1.7 Hard-refresh keybind
 
-## Phase 2 — YouTube and thumbnails
+## Phase 2: YouTube and thumbnails
 
 - [ ] 2.1 `YoutubeAdapter` wrapping `RssAdapter`
 - [ ] 2.2 YouTube Data API v3 enrichment (batched `videos.list`)
@@ -34,7 +34,7 @@ Last updated: 2026-04-15
 - [ ] 2.4 Kitty-protocol thumbnails via `viuer` with text fallback
 - [ ] 2.5 Per-source ranking mode override in config
 
-## Phase 3 — Ratings, overflow, and search
+## Phase 3: Ratings, overflow, and search
 
 - [ ] 3.1 1–5 star rating keybind and storage
 - [ ] 3.2 "Viewed" view with today's counter
@@ -42,7 +42,7 @@ Last updated: 2026-04-15
 - [ ] 3.4 Starring
 - [ ] 3.5 SQLite FTS5 search over title and summary
 
-## Phase 4 — AI ranking
+## Phase 4: AI ranking
 
 - [ ] 4.1 `ClaudeRanker` calling the Anthropic API
 - [ ] 4.2 Interests prompt loaded from config
