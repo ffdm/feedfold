@@ -20,5 +20,8 @@
 *.swp
 *.swo
 
-# Local learning walkthroughs — personal notes, not project docs
+# Local learning walkthroughs: personal notes, not project docs
 /walkthroughs/
+
+# Ralph loop iteration logs
+/.ralph/
