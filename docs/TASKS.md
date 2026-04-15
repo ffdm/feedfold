@@ -24,7 +24,7 @@ Last updated: 2026-04-14
 - [x] 1.4 `Ranker` trait and `RecencyRanker` implementation
 - [x] 1.5 Minimal ratatui home view (`j/k/enter/q`) reading from storage
 - [x] 1.6 Read / unread state wired through UI and storage
-- [ ] 1.7 Hard-refresh keybind
+- [~] 1.7 Hard-refresh keybind
 
 ## Phase 2: YouTube and thumbnails
 
