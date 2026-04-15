@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use directories::ProjectDirs;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -393,6 +393,17 @@ impl Storage {
         Ok(())
     }
 
+    pub fn record_entry_view(&mut self, id: i64) -> Result<(), StorageError> {
+        let now = Local::now();
+        let viewed_at = now.with_timezone(&Utc);
+        let viewed_on = now.date_naive();
+        self.record_entry_view_at(id, viewed_at, viewed_on)
+    }
+
+    pub fn count_entries_viewed_today(&self) -> Result<usize, StorageError> {
+        self.count_entries_viewed_on(Local::now().date_naive())
+    }
+
     pub fn list_top_n_entries(&self) -> Result<Vec<Entry>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_id, external_id, title, summary, url, thumbnail_url, \
@@ -402,6 +413,18 @@ impl Storage {
              ORDER BY score DESC, published_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_entry)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn list_viewed_entries(&self) -> Result<Vec<Entry>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_id, external_id, title, summary, url, thumbnail_url, \
+                    author, published_at, fetched_at, state, rating, score, \
+                    displayed_in_top_n \
+             FROM entries WHERE state = ?1 \
+             ORDER BY published_at DESC, fetched_at DESC",
+        )?;
+        let rows = stmt.query_map([EntryState::Viewed], row_to_entry)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -415,6 +438,35 @@ impl Storage {
         )?;
         let rows = stmt.query_map([source_id], row_to_entry)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn record_entry_view_at(
+        &mut self,
+        id: i64,
+        viewed_at: DateTime<Utc>,
+        viewed_on: NaiveDate,
+    ) -> Result<(), StorageError> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE entries SET state = ?1 WHERE id = ?2 AND state = ?3",
+            params![EntryState::Viewed, id, EntryState::New],
+        )?;
+        tx.execute(
+            "INSERT INTO daily_views (date, entry_id, viewed_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(date, entry_id) DO UPDATE SET viewed_at = excluded.viewed_at",
+            params![viewed_on.to_string(), id, viewed_at],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn count_entries_viewed_on(&self, viewed_on: NaiveDate) -> Result<usize, StorageError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM daily_views WHERE date = ?1",
+            [viewed_on.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 }
 
@@ -784,5 +836,81 @@ mod tests {
 
         let err = storage.set_entry_rating(entry.id, 0).unwrap_err();
         assert!(matches!(err, StorageError::InvalidRating(0)));
+    }
+
+    #[test]
+    fn record_entry_view_marks_entry_viewed_and_counts_unique_daily_views() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        storage
+            .upsert_entries(&[
+                new_entry(source_id, "a", "Entry A"),
+                new_entry(source_id, "b", "Entry B"),
+            ])
+            .unwrap();
+        let entries = storage.list_entries_for_source(source_id).unwrap();
+        let first = entries
+            .iter()
+            .find(|entry| entry.external_id == "a")
+            .unwrap();
+        let second = entries
+            .iter()
+            .find(|entry| entry.external_id == "b")
+            .unwrap();
+        let viewed_on = NaiveDate::from_ymd_opt(2026, 4, 15).unwrap();
+        let first_seen_at = Utc::now();
+
+        storage
+            .record_entry_view_at(first.id, first_seen_at, viewed_on)
+            .unwrap();
+        storage
+            .record_entry_view_at(first.id, Utc::now(), viewed_on)
+            .unwrap();
+        storage
+            .record_entry_view_at(second.id, Utc::now(), viewed_on)
+            .unwrap();
+
+        let viewed_entries = storage.list_viewed_entries().unwrap();
+        assert_eq!(storage.count_entries_viewed_on(viewed_on).unwrap(), 2);
+        assert_eq!(viewed_entries.len(), 2);
+        assert!(viewed_entries
+            .iter()
+            .all(|entry| entry.state == EntryState::Viewed));
+    }
+
+    #[test]
+    fn list_viewed_entries_excludes_new_entries() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        storage
+            .upsert_entries(&[
+                new_entry(source_id, "new", "New Entry"),
+                new_entry(source_id, "viewed", "Viewed Entry"),
+            ])
+            .unwrap();
+        let viewed_entry = storage
+            .list_entries_for_source(source_id)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.external_id == "viewed")
+            .unwrap();
+
+        storage
+            .record_entry_view_at(
+                viewed_entry.id,
+                Utc::now(),
+                NaiveDate::from_ymd_opt(2026, 4, 15).unwrap(),
+            )
+            .unwrap();
+
+        let viewed_entries = storage.list_viewed_entries().unwrap();
+        assert_eq!(viewed_entries.len(), 1);
+        assert_eq!(viewed_entries[0].external_id, "viewed");
     }
 }

@@ -56,6 +56,12 @@ enum ThumbnailMode {
     TextFallback,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveView {
+    Home,
+    Viewed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ThumbnailStatus {
     Loading,
@@ -106,7 +112,9 @@ async fn run_tui() -> Result<()> {
 }
 
 struct App {
+    active_view: ActiveView,
     entries: Vec<Entry>,
+    viewed_today_count: usize,
     state: ListState,
     thumbnail_mode: ThumbnailMode,
     thumbnail_dir: PathBuf,
@@ -123,7 +131,9 @@ impl App {
             state.select(Some(0));
         }
         App {
+            active_view: ActiveView::Home,
             entries,
+            viewed_today_count: 0,
             state,
             thumbnail_mode,
             thumbnail_dir,
@@ -170,6 +180,17 @@ impl App {
     fn replace_entries(&mut self, entries: Vec<Entry>) {
         self.entries = entries;
         self.sync_selection();
+    }
+
+    fn set_view(&mut self, active_view: ActiveView) {
+        self.active_view = active_view;
+    }
+
+    fn list_title(&self) -> String {
+        match self.active_view {
+            ActiveView::Home => "Home".to_string(),
+            ActiveView::Viewed => format!("Viewed (today: {})", self.viewed_today_count),
+        }
     }
 
     fn sync_selection(&mut self) {
@@ -279,8 +300,18 @@ fn run_app(
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('h') => {
+                        app.set_view(ActiveView::Home);
+                        refresh_view(app, storage)?;
+                        needs_redraw = true;
+                    }
+                    KeyCode::Char('v') => {
+                        app.set_view(ActiveView::Viewed);
+                        refresh_view(app, storage)?;
+                        needs_redraw = true;
+                    }
                     KeyCode::Char('r') => {
-                        app.replace_entries(storage.list_top_n_entries()?);
+                        refresh_view(app, storage)?;
                         needs_redraw = true;
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
@@ -300,15 +331,24 @@ fn run_app(
                         }
                     }
                     KeyCode::Enter => {
-                        if let Some(i) = app.state.selected() {
-                            if let Some(entry) = app.entries.get_mut(i) {
-                                let _ = open::that(&entry.url);
-                                if entry.state == EntryState::New {
+                        if let Some((entry_id, url, was_new)) = app.selected_entry().map(|entry| {
+                            (entry.id, entry.url.clone(), entry.state == EntryState::New)
+                        }) {
+                            let _ = open::that(&url);
+                            storage.record_entry_view(entry_id)?;
+                            app.viewed_today_count = storage.count_entries_viewed_today()?;
+
+                            if let Some(entry) = app.selected_entry_mut() {
+                                if was_new {
                                     entry.state = EntryState::Viewed;
-                                    let _ = storage.set_entry_state(entry.id, EntryState::Viewed);
-                                    needs_redraw = true;
                                 }
                             }
+
+                            if app.active_view == ActiveView::Viewed {
+                                refresh_view(app, storage)?;
+                            }
+
+                            needs_redraw = true;
                         }
                     }
                     _ => {}
@@ -316,6 +356,21 @@ fn run_app(
             }
         }
     }
+}
+
+fn load_entries_for_view(storage: &Storage, active_view: ActiveView) -> Result<Vec<Entry>> {
+    match active_view {
+        ActiveView::Home => Ok(storage.list_top_n_entries()?),
+        ActiveView::Viewed => Ok(storage.list_viewed_entries()?),
+    }
+}
+
+fn refresh_view(app: &mut App, storage: &Storage) -> Result<()> {
+    app.replace_entries(load_entries_for_view(storage, app.active_view)?);
+    if app.active_view == ActiveView::Viewed {
+        app.viewed_today_count = storage.count_entries_viewed_today()?;
+    }
+    Ok(())
 }
 
 fn ui(f: &mut ratatui::Frame, app: &mut App) {
@@ -343,7 +398,11 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .collect();
 
     let items_list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Home"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(app.list_title()),
+        )
         .highlight_style(
             Style::default()
                 .bg(Color::DarkGray)
@@ -584,6 +643,16 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
+    use feedfold_core::config::AdapterType;
+
+    fn sample_source() -> NewSource {
+        NewSource {
+            name: "Example Feed".to_string(),
+            url: "https://example.com/feed.xml".to_string(),
+            adapter: AdapterType::Rss,
+            top_n_override: None,
+        }
+    }
 
     fn sample_entry() -> Entry {
         Entry {
@@ -601,6 +670,20 @@ mod tests {
             rating: None,
             score: Some(123.0),
             displayed_in_top_n: true,
+        }
+    }
+
+    fn sample_new_entry(source_id: i64, external_id: &str, title: &str) -> NewEntry {
+        NewEntry {
+            source_id,
+            external_id: external_id.to_string(),
+            title: title.to_string(),
+            summary: Some(format!("Summary for {title}.")),
+            url: format!("https://example.com/posts/{external_id}"),
+            thumbnail_url: None,
+            author: Some("Example Feed".to_string()),
+            published_at: Some(Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).single().unwrap()),
+            enrichments: HashMap::new(),
         }
     }
 
@@ -655,5 +738,47 @@ mod tests {
 
         assert_eq!(first, second);
         assert_ne!(first, other);
+    }
+
+    #[test]
+    fn viewed_title_includes_todays_count() {
+        let mut app = App::new(
+            vec![sample_entry()],
+            ThumbnailMode::TextFallback,
+            PathBuf::new(),
+        );
+        app.set_view(ActiveView::Viewed);
+        app.viewed_today_count = 3;
+
+        assert_eq!(app.list_title(), "Viewed (today: 3)");
+    }
+
+    #[test]
+    fn refresh_view_loads_viewed_entries_and_today_count() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage.insert_source(&sample_source()).unwrap();
+
+        storage
+            .upsert_entries(&[
+                sample_new_entry(source_id, "new", "New Entry"),
+                sample_new_entry(source_id, "viewed", "Viewed Entry"),
+            ])
+            .unwrap();
+        let viewed_entry = storage
+            .list_entries_for_source(source_id)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.external_id == "viewed")
+            .unwrap();
+        storage.record_entry_view(viewed_entry.id).unwrap();
+
+        let mut app = App::new(Vec::new(), ThumbnailMode::TextFallback, PathBuf::new());
+        app.set_view(ActiveView::Viewed);
+
+        refresh_view(&mut app, &storage).unwrap();
+
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].external_id, "viewed");
+        assert_eq!(app.viewed_today_count, 1);
     }
 }
