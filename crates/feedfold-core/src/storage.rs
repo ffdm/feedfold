@@ -270,33 +270,40 @@ impl Storage {
                  ON CONFLICT(source_id, external_id) DO NOTHING \
                  RETURNING id",
             )?;
-            let mut check_exists_stmt = tx.prepare(
-                "SELECT id FROM entries WHERE source_id = ?1 AND external_id = ?2",
-            )?;
+            let mut check_exists_stmt =
+                tx.prepare("SELECT id FROM entries WHERE source_id = ?1 AND external_id = ?2")?;
             let mut insert_enrichment_stmt = tx.prepare(
                 "INSERT INTO enrichments (entry_id, key, value) \
                  VALUES (?1, ?2, ?3) \
                  ON CONFLICT(entry_id, key) DO UPDATE SET value = excluded.value",
             )?;
-            
+
             let now = Utc::now();
             for entry in entries {
-                let id_opt: Option<i64> = insert_entry_stmt.query_row(params![
-                    entry.source_id,
-                    entry.external_id,
-                    entry.title,
-                    entry.summary,
-                    entry.url,
-                    entry.thumbnail_url,
-                    entry.author,
-                    entry.published_at,
-                    now,
-                ], |row| row.get(0)).optional()?;
-                
+                let id_opt: Option<i64> = insert_entry_stmt
+                    .query_row(
+                        params![
+                            entry.source_id,
+                            entry.external_id,
+                            entry.title,
+                            entry.summary,
+                            entry.url,
+                            entry.thumbnail_url,
+                            entry.author,
+                            entry.published_at,
+                            now,
+                        ],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+
                 let (entry_id, is_new) = match id_opt {
                     Some(id) => (id, true),
                     None => {
-                        let id: i64 = check_exists_stmt.query_row(params![entry.source_id, entry.external_id], |row| row.get(0))?;
+                        let id: i64 = check_exists_stmt
+                            .query_row(params![entry.source_id, entry.external_id], |row| {
+                                row.get(0)
+                            })?;
                         (id, false)
                     }
                 };
@@ -304,7 +311,7 @@ impl Storage {
                 if is_new {
                     inserted += 1;
                 }
-                
+
                 for (key, value) in &entry.enrichments {
                     insert_enrichment_stmt.execute(params![entry_id, key, value])?;
                 }
@@ -336,6 +343,33 @@ impl Storage {
         Ok(())
     }
 
+    pub fn list_enrichments_for_source(
+        &self,
+        source_id: i64,
+    ) -> Result<HashMap<i64, HashMap<String, String>>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT enrichments.entry_id, enrichments.key, enrichments.value \
+             FROM enrichments \
+             INNER JOIN entries ON entries.id = enrichments.entry_id \
+             WHERE entries.source_id = ?1 \
+             ORDER BY enrichments.entry_id, enrichments.key",
+        )?;
+        let mut rows = stmt.query([source_id])?;
+        let mut enrichments = HashMap::new();
+
+        while let Some(row) = rows.next()? {
+            let entry_id: i64 = row.get(0)?;
+            let key: String = row.get(1)?;
+            let value: String = row.get(2)?;
+            enrichments
+                .entry(entry_id)
+                .or_insert_with(HashMap::new)
+                .insert(key, value);
+        }
+
+        Ok(enrichments)
+    }
+
     pub fn set_entry_state(&mut self, id: i64, state: EntryState) -> Result<(), StorageError> {
         self.conn.execute(
             "UPDATE entries SET state = ?1 WHERE id = ?2",
@@ -350,7 +384,7 @@ impl Storage {
                     author, published_at, fetched_at, state, rating, score, \
                     displayed_in_top_n \
              FROM entries WHERE displayed_in_top_n = 1 \
-             ORDER BY published_at DESC",
+             ORDER BY score DESC, published_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_entry)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -559,6 +593,45 @@ mod tests {
     }
 
     #[test]
+    fn list_enrichments_for_source_groups_by_entry() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        let mut first = new_entry(source_id, "a", "Entry A");
+        first
+            .enrichments
+            .insert("youtube_view_count".into(), "42".into());
+        first
+            .enrichments
+            .insert("youtube_duration".into(), "PT3M14S".into());
+
+        let mut second = new_entry(source_id, "b", "Entry B");
+        second
+            .enrichments
+            .insert("youtube_view_count".into(), "100".into());
+
+        storage.upsert_entries(&[first, second]).unwrap();
+        let entries = storage.list_entries_for_source(source_id).unwrap();
+        let first_id = entries
+            .iter()
+            .find(|entry| entry.external_id == "a")
+            .map(|entry| entry.id)
+            .unwrap();
+        let second_id = entries
+            .iter()
+            .find(|entry| entry.external_id == "b")
+            .map(|entry| entry.id)
+            .unwrap();
+        let enrichments = storage.list_enrichments_for_source(source_id).unwrap();
+
+        assert_eq!(enrichments.len(), 2);
+        assert_eq!(enrichments.get(&first_id).map(HashMap::len), Some(2));
+        assert_eq!(enrichments.get(&second_id).map(HashMap::len), Some(1));
+    }
+
+    #[test]
     fn apply_ranking_sets_scores_and_top_n() {
         use crate::ranker::Score;
 
@@ -576,9 +649,18 @@ mod tests {
         let db_entries = storage.list_entries_for_source(source_id).unwrap();
 
         let scores = vec![
-            Score { entry_id: db_entries[0].id, value: 30.0 },
-            Score { entry_id: db_entries[1].id, value: 20.0 },
-            Score { entry_id: db_entries[2].id, value: 10.0 },
+            Score {
+                entry_id: db_entries[0].id,
+                value: 30.0,
+            },
+            Score {
+                entry_id: db_entries[1].id,
+                value: 20.0,
+            },
+            Score {
+                entry_id: db_entries[2].id,
+                value: 10.0,
+            },
         ];
         storage.apply_ranking(source_id, &scores, 2).unwrap();
 
@@ -593,5 +675,53 @@ mod tests {
         assert!(a.displayed_in_top_n);
         assert!(b.displayed_in_top_n);
         assert!(!c.displayed_in_top_n);
+    }
+
+    #[test]
+    fn list_top_n_entries_orders_by_score_then_date() {
+        use crate::ranker::Score;
+
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        let mut low = new_entry(source_id, "low", "Low");
+        low.published_at = Some(Utc::now());
+
+        let mut high = new_entry(source_id, "high", "High");
+        high.published_at = Some(Utc::now());
+
+        storage.upsert_entries(&[low, high]).unwrap();
+        let entries = storage.list_entries_for_source(source_id).unwrap();
+        let low = entries
+            .iter()
+            .find(|entry| entry.external_id == "low")
+            .unwrap();
+        let high = entries
+            .iter()
+            .find(|entry| entry.external_id == "high")
+            .unwrap();
+
+        storage
+            .apply_ranking(
+                source_id,
+                &[
+                    Score {
+                        entry_id: low.id,
+                        value: 10.0,
+                    },
+                    Score {
+                        entry_id: high.id,
+                        value: 20.0,
+                    },
+                ],
+                2,
+            )
+            .unwrap();
+
+        let top = storage.list_top_n_entries().unwrap();
+        assert_eq!(top[0].external_id, "high");
+        assert_eq!(top[1].external_id, "low");
     }
 }

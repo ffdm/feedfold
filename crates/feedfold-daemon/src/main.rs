@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use feedfold_adapters::{RssAdapter, YoutubeAdapter};
 use feedfold_core::adapter::SourceAdapter;
 use feedfold_core::config::{AdapterType, Config};
-use feedfold_core::ranker::{RankContext, Ranker, RecencyRanker};
+use feedfold_core::ranker::{PopularityRanker, RankContext, Ranker};
 use feedfold_core::storage::Storage;
 use tracing::{error, info};
 
@@ -44,10 +44,17 @@ async fn main() -> Result<()> {
         .filter(|value| !value.trim().is_empty())
         .map(YoutubeAdapter::with_api_key)
         .unwrap_or_default();
-    let ranker = RecencyRanker;
+    let ranker = PopularityRanker;
     let default_top_n = config.general.default_top_n;
 
-    poll_all(&mut storage, &rss_adapter, &youtube_adapter, &ranker, default_top_n).await;
+    poll_all(
+        &mut storage,
+        &rss_adapter,
+        &youtube_adapter,
+        &ranker,
+        default_top_n,
+    )
+    .await;
 
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await;
@@ -122,7 +129,17 @@ async fn poll_all(
         let top_n = source.top_n_override.unwrap_or(default_top_n) as usize;
         match storage.list_entries_for_source(source.id) {
             Ok(entries) => {
-                let scores = ranker.rank(&entries, &RankContext { top_n });
+                let enrichments = match storage.list_enrichments_for_source(source.id) {
+                    Ok(enrichments) => enrichments,
+                    Err(e) => {
+                        error!(
+                            "{}: failed to load enrichments for ranking: {e}",
+                            source.name
+                        );
+                        continue;
+                    }
+                };
+                let scores = ranker.rank(&entries, &RankContext { top_n, enrichments });
                 if let Err(e) = storage.apply_ranking(source.id, &scores, top_n) {
                     error!("{}: ranking update failed: {e}", source.name);
                 }
