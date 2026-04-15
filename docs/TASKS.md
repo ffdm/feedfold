@@ -21,7 +21,7 @@ Last updated: 2026-04-14
 - [x] 1.1 `SourceAdapter` trait in `feedfold-core`
 - [x] 1.2 `RssAdapter` implementation
 - [x] 1.3 Background daemon with scheduled polling via tokio
-- [ ] 1.4 `Ranker` trait and `RecencyRanker` implementation
+- [~] 1.4 `Ranker` trait and `RecencyRanker` implementation
 - [ ] 1.5 Minimal ratatui home view (`j/k/enter/q`) reading from storage
 - [ ] 1.6 Read / unread state wired through UI and storage
 - [ ] 1.7 Hard-refresh keybind
