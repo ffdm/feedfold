@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use feedfold_adapters::RssAdapter;
+use feedfold_adapters::{RssAdapter, YoutubeAdapter};
 use feedfold_core::adapter::SourceAdapter;
 use feedfold_core::config::{AdapterType, Config};
 use feedfold_core::ranker::{RankContext, Ranker, RecencyRanker};
 use feedfold_core::storage::Storage;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -38,11 +38,12 @@ async fn main() -> Result<()> {
         .with_context(|| format!("opening database at {}", db_path.display()))?;
     info!("Database: {}", db_path.display());
 
-    let adapter = RssAdapter::new();
+    let rss_adapter = RssAdapter::new();
+    let youtube_adapter = YoutubeAdapter::new();
     let ranker = RecencyRanker;
     let default_top_n = config.general.default_top_n;
 
-    poll_all(&mut storage, &adapter, &ranker, default_top_n).await;
+    poll_all(&mut storage, &rss_adapter, &youtube_adapter, &ranker, default_top_n).await;
 
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await;
@@ -50,7 +51,7 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                poll_all(&mut storage, &adapter, &ranker, default_top_n).await;
+                poll_all(&mut storage, &rss_adapter, &youtube_adapter, &ranker, default_top_n).await;
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("Shutting down");
@@ -64,7 +65,8 @@ async fn main() -> Result<()> {
 
 async fn poll_all(
     storage: &mut Storage,
-    adapter: &RssAdapter,
+    rss_adapter: &RssAdapter,
+    youtube_adapter: &YoutubeAdapter,
     ranker: &impl Ranker,
     default_top_n: u32,
 ) {
@@ -84,15 +86,12 @@ async fn poll_all(
     info!("Polling {} source(s)", sources.len());
 
     for source in &sources {
-        if source.adapter != AdapterType::Rss {
-            warn!(
-                "Skipping {:?} adapter for {}, not yet supported",
-                source.adapter, source.name
-            );
-            continue;
-        }
+        let fetch_result = match source.adapter {
+            AdapterType::Rss => rss_adapter.fetch(&source.url).await,
+            AdapterType::Youtube => youtube_adapter.fetch(&source.url).await,
+        };
 
-        match adapter.fetch(&source.url).await {
+        match fetch_result {
             Ok(fetched) => {
                 let new_entries: Vec<_> = fetched
                     .entries
