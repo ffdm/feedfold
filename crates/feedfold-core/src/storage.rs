@@ -421,10 +421,10 @@ impl Storage {
             "SELECT id, source_id, external_id, title, summary, url, thumbnail_url, \
                     author, published_at, fetched_at, state, rating, score, \
                     displayed_in_top_n \
-             FROM entries WHERE state = ?1 \
+             FROM entries WHERE state IN (?1, ?2) \
              ORDER BY published_at DESC, fetched_at DESC",
         )?;
-        let rows = stmt.query_map([EntryState::Viewed], row_to_entry)?;
+        let rows = stmt.query_map([EntryState::Viewed, EntryState::Starred], row_to_entry)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -928,6 +928,45 @@ mod tests {
     }
 
     #[test]
+    fn list_viewed_entries_includes_starred_entries() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        storage
+            .upsert_entries(&[
+                new_entry(source_id, "new", "New Entry"),
+                new_entry(source_id, "viewed", "Viewed Entry"),
+                new_entry(source_id, "starred", "Starred Entry"),
+            ])
+            .unwrap();
+        let entries = storage.list_entries_for_source(source_id).unwrap();
+        let viewed = entries
+            .iter()
+            .find(|entry| entry.external_id == "viewed")
+            .unwrap();
+        let starred = entries
+            .iter()
+            .find(|entry| entry.external_id == "starred")
+            .unwrap();
+
+        storage.record_entry_view(viewed.id).unwrap();
+        storage
+            .set_entry_state(starred.id, EntryState::Starred)
+            .unwrap();
+
+        let viewed_entries = storage.list_viewed_entries().unwrap();
+        assert_eq!(viewed_entries.len(), 2);
+        assert!(viewed_entries
+            .iter()
+            .any(|entry| entry.external_id == "viewed"));
+        assert!(viewed_entries
+            .iter()
+            .any(|entry| entry.external_id == "starred" && entry.state == EntryState::Starred));
+    }
+
+    #[test]
     fn list_overflow_entries_returns_only_new_entries_outside_top_n() {
         use crate::ranker::Score;
 
@@ -944,7 +983,10 @@ mod tests {
             ])
             .unwrap();
         let entries = storage.list_entries_for_source(source_id).unwrap();
-        let top = entries.iter().find(|entry| entry.external_id == "top").unwrap();
+        let top = entries
+            .iter()
+            .find(|entry| entry.external_id == "top")
+            .unwrap();
         let overflow = entries
             .iter()
             .find(|entry| entry.external_id == "overflow")

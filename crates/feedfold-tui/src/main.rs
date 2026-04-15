@@ -337,6 +337,11 @@ fn run_app(
                             needs_redraw = true;
                         }
                     }
+                    KeyCode::Char('s') => {
+                        if toggle_star_for_selected(app, storage)? {
+                            needs_redraw = true;
+                        }
+                    }
                     KeyCode::Enter => {
                         if let Some((entry_id, url, was_new)) = app.selected_entry().map(|entry| {
                             (entry.id, entry.url.clone(), entry.state == EntryState::New)
@@ -374,6 +379,29 @@ fn load_entries_for_view(storage: &Storage, active_view: ActiveView) -> Result<V
     }
 }
 
+fn toggle_star_for_selected(app: &mut App, storage: &mut Storage) -> Result<bool> {
+    let Some((entry_id, next_state)) = app.selected_entry().map(|entry| {
+        let next_state = if entry.state == EntryState::Starred {
+            EntryState::Viewed
+        } else {
+            EntryState::Starred
+        };
+        (entry.id, next_state)
+    }) else {
+        return Ok(false);
+    };
+
+    storage.set_entry_state(entry_id, next_state)?;
+
+    if app.active_view == ActiveView::Overflow {
+        refresh_view(app, storage)?;
+    } else if let Some(entry) = app.selected_entry_mut() {
+        entry.state = next_state;
+    }
+
+    Ok(true)
+}
+
 fn refresh_view(app: &mut App, storage: &Storage) -> Result<()> {
     app.replace_entries(load_entries_for_view(storage, app.active_view)?);
     if app.active_view == ActiveView::Viewed {
@@ -400,7 +428,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             };
             let line = Line::from(vec![
                 Span::styled(format!("[{source}] "), Style::default().fg(Color::DarkGray)),
-                Span::styled(entry.title.clone(), title_style),
+                Span::styled(entry_list_title(entry), title_style),
             ]);
             ListItem::new(line)
         })
@@ -500,6 +528,7 @@ fn build_summary_text(entry: Option<&Entry>) -> String {
     if let Some(date) = entry.published_at {
         text.push_str(&format!("Published: {}\n", date.to_rfc2822()));
     }
+    text.push_str(&format!("State: {}\n", entry.state.as_canonical_str()));
     let rating = entry
         .rating
         .map(|rating| rating.to_string())
@@ -593,6 +622,14 @@ fn download_thumbnail(url: &str, path: &Path) -> Result<()> {
     fs::write(&temp_path, &bytes).with_context(|| format!("writing {}", temp_path.display()))?;
     fs::rename(&temp_path, path).with_context(|| format!("persisting {}", path.display()))?;
     Ok(())
+}
+
+fn entry_list_title(entry: &Entry) -> String {
+    if entry.state == EntryState::Starred {
+        format!("* {}", entry.title)
+    } else {
+        entry.title.clone()
+    }
 }
 
 async fn add_feed(url: &str, override_name: Option<&str>) -> Result<()> {
@@ -724,6 +761,7 @@ mod tests {
         assert!(text.contains("Title: Feedfold ships thumbnails"));
         assert!(text.contains("URL: https://example.com/posts/1"));
         assert!(text.contains("Published: Tue, 2 Jan 2024 03:04:05 +0000"));
+        assert!(text.contains("State: new"));
         assert!(text.contains("Rating: unrated"));
         assert!(text.contains("Selected entries can show inline thumbnails."));
     }
@@ -736,6 +774,14 @@ mod tests {
         let text = build_summary_text(Some(&entry));
 
         assert!(text.contains("Rating: 5"));
+    }
+
+    #[test]
+    fn starred_entries_get_a_list_marker() {
+        let mut entry = sample_entry();
+        entry.state = EntryState::Starred;
+
+        assert_eq!(entry_list_title(&entry), "* Feedfold ships thumbnails");
     }
 
     #[test]
@@ -792,6 +838,48 @@ mod tests {
     }
 
     #[test]
+    fn refresh_view_includes_starred_entries_in_viewed_list() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage.insert_source(&sample_source()).unwrap();
+
+        storage
+            .upsert_entries(&[
+                sample_new_entry(source_id, "viewed", "Viewed Entry"),
+                sample_new_entry(source_id, "starred", "Starred Entry"),
+            ])
+            .unwrap();
+        let entries = storage.list_entries_for_source(source_id).unwrap();
+        let viewed = entries
+            .iter()
+            .find(|entry| entry.external_id == "viewed")
+            .unwrap();
+        let starred = entries
+            .iter()
+            .find(|entry| entry.external_id == "starred")
+            .unwrap();
+
+        storage.record_entry_view(viewed.id).unwrap();
+        storage
+            .set_entry_state(starred.id, EntryState::Starred)
+            .unwrap();
+
+        let mut app = App::new(Vec::new(), ThumbnailMode::TextFallback, PathBuf::new());
+        app.set_view(ActiveView::Viewed);
+
+        refresh_view(&mut app, &storage).unwrap();
+
+        assert_eq!(app.entries.len(), 2);
+        assert!(app
+            .entries
+            .iter()
+            .any(|entry| entry.external_id == "viewed"));
+        assert!(app
+            .entries
+            .iter()
+            .any(|entry| entry.external_id == "starred" && entry.state == EntryState::Starred));
+    }
+
+    #[test]
     fn overflow_title_is_static() {
         let mut app = App::new(
             vec![sample_entry()],
@@ -818,7 +906,10 @@ mod tests {
             ])
             .unwrap();
         let entries = storage.list_entries_for_source(source_id).unwrap();
-        let top = entries.iter().find(|entry| entry.external_id == "top").unwrap();
+        let top = entries
+            .iter()
+            .find(|entry| entry.external_id == "top")
+            .unwrap();
         let overflow = entries
             .iter()
             .find(|entry| entry.external_id == "overflow")
@@ -857,5 +948,49 @@ mod tests {
 
         assert_eq!(app.entries.len(), 1);
         assert_eq!(app.entries[0].external_id, "overflow");
+    }
+
+    #[test]
+    fn toggling_star_in_overflow_refreshes_the_list() {
+        use feedfold_core::ranker::Score;
+
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage.insert_source(&sample_source()).unwrap();
+
+        storage
+            .upsert_entries(&[sample_new_entry(source_id, "overflow", "Overflow Entry")])
+            .unwrap();
+        let entry = storage
+            .list_entries_for_source(source_id)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.external_id == "overflow")
+            .unwrap();
+        storage
+            .apply_ranking(
+                source_id,
+                &[Score {
+                    entry_id: entry.id,
+                    value: 10.0,
+                }],
+                0,
+            )
+            .unwrap();
+
+        let mut app = App::new(Vec::new(), ThumbnailMode::TextFallback, PathBuf::new());
+        app.set_view(ActiveView::Overflow);
+        refresh_view(&mut app, &storage).unwrap();
+
+        assert_eq!(app.entries.len(), 1);
+        assert!(toggle_star_for_selected(&mut app, &mut storage).unwrap());
+        assert!(app.entries.is_empty());
+
+        let updated = storage
+            .list_entries_for_source(source_id)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == entry.id)
+            .unwrap();
+        assert_eq!(updated.state, EntryState::Starred);
     }
 }
