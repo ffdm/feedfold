@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -81,6 +82,7 @@ pub struct NewEntry {
     pub thumbnail_url: Option<String>,
     pub author: Option<String>,
     pub published_at: Option<DateTime<Utc>>,
+    pub enrichments: HashMap<String, String>,
 }
 
 impl ToSql for AdapterType {
@@ -260,16 +262,26 @@ impl Storage {
         let tx = self.conn.transaction()?;
         let mut inserted = 0usize;
         {
-            let mut stmt = tx.prepare(
+            let mut insert_entry_stmt = tx.prepare(
                 "INSERT INTO entries \
                     (source_id, external_id, title, summary, url, thumbnail_url, \
                      author, published_at, fetched_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
-                 ON CONFLICT(source_id, external_id) DO NOTHING",
+                 ON CONFLICT(source_id, external_id) DO UPDATE SET external_id = external_id \
+                 RETURNING id",
             )?;
+            let mut check_exists_stmt = tx.prepare(
+                "SELECT id FROM entries WHERE source_id = ?1 AND external_id = ?2",
+            )?;
+            let mut insert_enrichment_stmt = tx.prepare(
+                "INSERT INTO enrichments (entry_id, key, value) \
+                 VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(entry_id, key) DO UPDATE SET value = excluded.value",
+            )?;
+            
             let now = Utc::now();
             for entry in entries {
-                let changed = stmt.execute(params![
+                let id_opt: Option<i64> = insert_entry_stmt.query_row(params![
                     entry.source_id,
                     entry.external_id,
                     entry.title,
@@ -279,8 +291,23 @@ impl Storage {
                     entry.author,
                     entry.published_at,
                     now,
-                ])?;
-                inserted += changed;
+                ], |row| row.get(0)).optional()?;
+                
+                let (entry_id, is_new) = match id_opt {
+                    Some(id) => (id, true),
+                    None => {
+                        let id: i64 = check_exists_stmt.query_row(params![entry.source_id, entry.external_id], |row| row.get(0))?;
+                        (id, false)
+                    }
+                };
+
+                if is_new {
+                    inserted += 1;
+                }
+                
+                for (key, value) in &entry.enrichments {
+                    insert_enrichment_stmt.execute(params![entry_id, key, value])?;
+                }
             }
         }
         tx.commit()?;

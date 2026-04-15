@@ -29,7 +29,7 @@ Last updated: 2026-04-14
 ## Phase 2: YouTube and thumbnails
 
 - [x] 2.1 `YoutubeAdapter` wrapping `RssAdapter`
-- [ ] 2.2 YouTube Data API v3 enrichment (batched `videos.list`)
+- [~] 2.2 YouTube Data API v3 enrichment (batched `videos.list`)
 - [ ] 2.3 `PopularityRanker` using enrichments
 - [ ] 2.4 Kitty-protocol thumbnails via `viuer` with text fallback
 - [ ] 2.5 Per-source ranking mode override in config

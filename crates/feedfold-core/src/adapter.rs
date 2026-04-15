@@ -21,6 +21,7 @@ pub struct FetchedEntry {
     pub thumbnail_url: Option<String>,
     pub author: Option<String>,
     pub published_at: Option<DateTime<Utc>>,
+    pub enrichments: std::collections::HashMap<String, String>,
 }
 
 impl FetchedEntry {
@@ -34,6 +35,7 @@ impl FetchedEntry {
             thumbnail_url: self.thumbnail_url,
             author: self.author,
             published_at: self.published_at,
+            enrichments: self.enrichments,
         }
     }
 }
@@ -87,6 +89,7 @@ mod tests {
                     thumbnail_url: None,
                     author: None,
                     published_at: None,
+                    enrichments: HashMap::new(),
                 }],
             })
         }
@@ -119,6 +122,7 @@ mod tests {
             thumbnail_url: None,
             author: Some("A".into()),
             published_at: None,
+            enrichments: HashMap::from([("key".into(), "val".into())]),
         };
         let ne = fe.into_new_entry(42);
         assert_eq!(ne.source_id, 42);
@@ -127,5 +131,6 @@ mod tests {
         assert_eq!(ne.summary.as_deref(), Some("S"));
         assert_eq!(ne.url, "https://example.com/x");
         assert_eq!(ne.author.as_deref(), Some("A"));
+        assert_eq!(ne.enrichments.get("key").map(|s| s.as_str()), Some("val"));
     }
 }
