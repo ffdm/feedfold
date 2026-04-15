@@ -17,3 +17,6 @@ feedfold-adapters = { workspace = true }
 anyhow            = { workspace = true }
 tokio             = { workspace = true }
 clap              = { workspace = true }
+ratatui = "0.30.0"
+crossterm = "0.29.0"
+open = "5.3.3"

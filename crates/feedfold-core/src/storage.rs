@@ -309,6 +309,18 @@ impl Storage {
         Ok(())
     }
 
+    pub fn list_top_n_entries(&self) -> Result<Vec<Entry>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_id, external_id, title, summary, url, thumbnail_url, \
+                    author, published_at, fetched_at, state, rating, score, \
+                    displayed_in_top_n \
+             FROM entries WHERE displayed_in_top_n = 1 \
+             ORDER BY published_at DESC",
+        )?;
+        let rows = stmt.query_map([], row_to_entry)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn list_entries_for_source(&self, source_id: i64) -> Result<Vec<Entry>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_id, external_id, title, summary, url, thumbnail_url, \
