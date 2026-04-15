@@ -491,6 +491,23 @@ impl Storage {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn list_rated_entries(&self, limit: usize) -> Result<Vec<Entry>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_id, external_id, title, summary, url, thumbnail_url, \
+                    author, published_at, fetched_at, state, rating, score, \
+                    displayed_in_top_n \
+             FROM entries WHERE rating IS NOT NULL \
+             ORDER BY published_at IS NULL, published_at DESC, fetched_at DESC \
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], row_to_entry)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn search_entries(&self, query: &str) -> Result<Vec<Entry>, StorageError> {
         let Some(match_query) = build_fts_query(query) else {
             return Ok(Vec::new());
@@ -941,6 +958,75 @@ mod tests {
 
         let err = storage.set_entry_rating(entry.id, 0).unwrap_err();
         assert!(matches!(err, StorageError::InvalidRating(0)));
+    }
+
+    #[test]
+    fn list_rated_entries_returns_only_rated_entries_in_recency_order() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        let mut older = new_entry(source_id, "older", "Older rated");
+        older.published_at = Some(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap());
+
+        let mut newer = new_entry(source_id, "newer", "Newer rated");
+        newer.published_at = Some(Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap());
+
+        let mut unrated = new_entry(source_id, "unrated", "Unrated");
+        unrated.published_at = Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap());
+
+        storage.upsert_entries(&[older, newer, unrated]).unwrap();
+
+        let listed = storage.list_entries_for_source(source_id).unwrap();
+        let older = listed
+            .iter()
+            .find(|entry| entry.external_id == "older")
+            .unwrap();
+        let newer = listed
+            .iter()
+            .find(|entry| entry.external_id == "newer")
+            .unwrap();
+        let unrated = listed
+            .iter()
+            .find(|entry| entry.external_id == "unrated")
+            .unwrap();
+
+        storage.set_entry_rating(older.id, 2).unwrap();
+        storage.set_entry_rating(newer.id, 5).unwrap();
+
+        let rated = storage.list_rated_entries(10).unwrap();
+        assert_eq!(rated.len(), 2);
+        assert_eq!(rated[0].id, newer.id);
+        assert_eq!(rated[0].rating, Some(5));
+        assert_eq!(rated[1].id, older.id);
+        assert_eq!(rated[1].rating, Some(2));
+        assert!(rated.iter().all(|entry| entry.id != unrated.id));
+    }
+
+    #[test]
+    fn list_rated_entries_respects_limit() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        let mut first = new_entry(source_id, "first", "First");
+        first.published_at = Some(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap());
+
+        let mut second = new_entry(source_id, "second", "Second");
+        second.published_at = Some(Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap());
+
+        storage.upsert_entries(&[first, second]).unwrap();
+
+        let listed = storage.list_entries_for_source(source_id).unwrap();
+        for entry in &listed {
+            storage.set_entry_rating(entry.id, 4).unwrap();
+        }
+
+        let rated = storage.list_rated_entries(1).unwrap();
+        assert_eq!(rated.len(), 1);
+        assert_eq!(rated[0].external_id, "second");
     }
 
     #[test]

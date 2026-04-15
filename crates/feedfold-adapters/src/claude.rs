@@ -65,6 +65,7 @@ impl ClaudeRanker {
         &self,
         entries: &[Entry],
         top_n: usize,
+        rating_history: &[Entry],
     ) -> Result<Vec<Score>, ClaudeRankerError> {
         if entries.is_empty() {
             return Ok(Vec::new());
@@ -82,7 +83,7 @@ impl ClaudeRanker {
                 system: build_system_prompt(&self.system_prompt, &self.interests),
                 messages: vec![Message {
                     role: "user",
-                    content: build_user_prompt(entries, top_n),
+                    content: build_user_prompt(entries, top_n, rating_history),
                 }],
             })
             .send()
@@ -167,13 +168,39 @@ fn build_system_prompt(system_prompt: &str, interests: &str) -> String {
     format!("{system_prompt}\n\nReader interests:\n{interests}")
 }
 
-fn build_user_prompt(entries: &[Entry], top_n: usize) -> String {
+fn build_user_prompt(entries: &[Entry], top_n: usize, rating_history: &[Entry]) -> String {
     let mut prompt = format!(
         "Rank these feed entries from best to worst for a thoughtful reader.\n\
          Return JSON only in this exact shape: {{\"ranked_entry_ids\":[... ]}}.\n\
          Include every entry id exactly once.\n\
-         The daemon will keep the top {top_n} entries after ranking.\n\n"
+         The daemon will keep the top {top_n} entries after ranking.\n"
     );
+
+    let rated_entries: Vec<_> = rating_history
+        .iter()
+        .filter_map(|entry| entry.rating.map(|rating| (entry, rating)))
+        .collect();
+    if !rated_entries.is_empty() {
+        prompt.push_str(
+            "Recent reader ratings are included below. Treat 5 as strong interest and 1 as strong dislike.\n\n",
+        );
+
+        for (entry, rating) in rated_entries {
+            let published_at = entry
+                .published_at
+                .map(|timestamp| timestamp.to_rfc3339())
+                .unwrap_or_else(|| "unknown".into());
+            let summary = entry.summary.as_deref().unwrap_or("");
+            let summary = summary.trim();
+
+            prompt.push_str(&format!(
+                "Rated Entry\nRating: {rating}/5\nTitle: {}\nPublished: {}\nURL: {}\nSummary: {}\n\n",
+                entry.title, published_at, entry.url, summary
+            ));
+        }
+    }
+
+    prompt.push_str("Entries to rank:\n\n");
 
     for entry in entries {
         let published_at = entry
@@ -279,7 +306,7 @@ mod tests {
         let scores = ClaudeRanker::new("test-key")
             .with_api_url(server_url)
             .with_model("claude-test")
-            .rank(&entries, 1)
+            .rank(&entries, 1, &[])
             .await
             .unwrap();
 
@@ -330,7 +357,7 @@ mod tests {
 
         let err = match ClaudeRanker::new("test-key")
             .with_api_url(server_url)
-            .rank(&entries, 1)
+            .rank(&entries, 1, &[])
             .await
         {
             Ok(_) => panic!("ranking should fail"),
@@ -342,7 +369,10 @@ mod tests {
 
     #[tokio::test]
     async fn claude_ranker_skips_network_for_empty_entries() {
-        let scores = ClaudeRanker::new("test-key").rank(&[], 3).await.unwrap();
+        let scores = ClaudeRanker::new("test-key")
+            .rank(&[], 3, &[])
+            .await
+            .unwrap();
         assert!(scores.is_empty());
     }
 
@@ -372,7 +402,7 @@ Skip product launches.
 
         ClaudeRanker::from_config("test-key", &config)
             .with_api_url(server_url)
-            .rank(&entries, 1)
+            .rank(&entries, 1, &[])
             .await
             .unwrap();
 
@@ -384,6 +414,38 @@ Skip product launches.
         assert!(system.contains(
             "Reader interests:\nRust internals and thoughtful essays.\nSkip product launches."
         ));
+    }
+
+    #[tokio::test]
+    async fn claude_ranker_includes_rating_history_in_user_prompt() {
+        let (entries, _) = sample_entries();
+        let rating_history = sample_rating_history();
+        let response_body = serde_json::json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": "{\"ranked_entry_ids\":[2,1]}"
+                }
+            ]
+        })
+        .to_string();
+        let (server_url, request_rx) = spawn_test_server(response_body).await;
+
+        ClaudeRanker::new("test-key")
+            .with_api_url(server_url)
+            .rank(&entries, 1, &rating_history)
+            .await
+            .unwrap();
+
+        let request = request_rx.await.unwrap();
+        let body: Value = serde_json::from_str(&request.body).unwrap();
+        let prompt = body["messages"][0]["content"].as_str().unwrap();
+
+        assert!(prompt.contains(
+            "Recent reader ratings are included below. Treat 5 as strong interest and 1 as strong dislike."
+        ));
+        assert!(prompt.contains("Rating: 5/5\nTitle: Beloved essay"));
+        assert!(prompt.contains("Rating: 1/5\nTitle: Skipped launch post"));
     }
 
     async fn spawn_test_server(
@@ -499,6 +561,59 @@ Skip product launches.
 
         let entries = storage.list_entries_for_source(source_id).unwrap();
         (entries.clone(), entries)
+    }
+
+    fn sample_rating_history() -> Vec<Entry> {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&NewSource {
+                name: "History".into(),
+                url: "https://example.com/history".into(),
+                adapter: AdapterType::Rss,
+                top_n_override: None,
+            })
+            .unwrap();
+
+        storage
+            .upsert_entries(&[
+                NewEntry {
+                    source_id,
+                    external_id: "liked".into(),
+                    title: "Beloved essay".into(),
+                    summary: Some("Deeply reported and reflective.".into()),
+                    url: "https://example.com/liked".into(),
+                    thumbnail_url: None,
+                    author: None,
+                    published_at: None,
+                    enrichments: HashMap::new(),
+                },
+                NewEntry {
+                    source_id,
+                    external_id: "disliked".into(),
+                    title: "Skipped launch post".into(),
+                    summary: Some("Mostly marketing copy.".into()),
+                    url: "https://example.com/disliked".into(),
+                    thumbnail_url: None,
+                    author: None,
+                    published_at: None,
+                    enrichments: HashMap::new(),
+                },
+            ])
+            .unwrap();
+
+        let entries = storage.list_entries_for_source(source_id).unwrap();
+        let liked = entries
+            .iter()
+            .find(|entry| entry.external_id == "liked")
+            .unwrap();
+        let disliked = entries
+            .iter()
+            .find(|entry| entry.external_id == "disliked")
+            .unwrap();
+
+        storage.set_entry_rating(liked.id, 5).unwrap();
+        storage.set_entry_rating(disliked.id, 1).unwrap();
+        storage.list_rated_entries(10).unwrap()
     }
 
     #[derive(Debug)]
