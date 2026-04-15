@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use feed_rs::parser;
 use feedfold_core::adapter::{AdapterError, FetchedEntry, FetchedFeed, SourceAdapter};
 use feedfold_core::config::AdapterType;
@@ -92,6 +94,7 @@ fn convert_entry(entry: feed_rs::model::Entry) -> Result<FetchedEntry, AdapterEr
         thumbnail_url,
         author,
         published_at: entry.published.or(entry.updated),
+        enrichments: HashMap::new(),
     })
 }
 

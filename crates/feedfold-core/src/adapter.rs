@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 
 use chrono::{DateTime, Utc};
@@ -21,7 +22,7 @@ pub struct FetchedEntry {
     pub thumbnail_url: Option<String>,
     pub author: Option<String>,
     pub published_at: Option<DateTime<Utc>>,
-    pub enrichments: std::collections::HashMap<String, String>,
+    pub enrichments: HashMap<String, String>,
 }
 
 impl FetchedEntry {

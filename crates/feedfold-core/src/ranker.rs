@@ -37,6 +37,8 @@ impl Ranker for RecencyRanker {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use chrono::{TimeZone, Utc};
 
     use super::*;
@@ -64,6 +66,7 @@ mod tests {
                 thumbnail_url: None,
                 author: None,
                 published_at: Some(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()),
+                enrichments: HashMap::new(),
             },
             NewEntry {
                 source_id,
@@ -74,6 +77,7 @@ mod tests {
                 thumbnail_url: None,
                 author: None,
                 published_at: Some(Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap()),
+                enrichments: HashMap::new(),
             },
             NewEntry {
                 source_id,
@@ -84,6 +88,7 @@ mod tests {
                 thumbnail_url: None,
                 author: None,
                 published_at: Some(Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap()),
+                enrichments: HashMap::new(),
             },
         ];
         storage.upsert_entries(&entries).unwrap();
@@ -135,6 +140,7 @@ mod tests {
                 thumbnail_url: None,
                 author: None,
                 published_at: Some(Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap()),
+                enrichments: HashMap::new(),
             },
             NewEntry {
                 source_id,
@@ -145,6 +151,7 @@ mod tests {
                 thumbnail_url: None,
                 author: None,
                 published_at: None,
+                enrichments: HashMap::new(),
             },
         ];
         storage.upsert_entries(&entries).unwrap();

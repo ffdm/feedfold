@@ -39,7 +39,11 @@ async fn main() -> Result<()> {
     info!("Database: {}", db_path.display());
 
     let rss_adapter = RssAdapter::new();
-    let youtube_adapter = YoutubeAdapter::new();
+    let youtube_adapter = std::env::var("YOUTUBE_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(YoutubeAdapter::with_api_key)
+        .unwrap_or_default();
     let ranker = RecencyRanker;
     let default_top_n = config.general.default_top_n;
 

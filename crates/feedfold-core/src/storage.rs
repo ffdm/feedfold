@@ -267,7 +267,7 @@ impl Storage {
                     (source_id, external_id, title, summary, url, thumbnail_url, \
                      author, published_at, fetched_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
-                 ON CONFLICT(source_id, external_id) DO UPDATE SET external_id = external_id \
+                 ON CONFLICT(source_id, external_id) DO NOTHING \
                  RETURNING id",
             )?;
             let mut check_exists_stmt = tx.prepare(
@@ -422,6 +422,7 @@ mod tests {
             thumbnail_url: None,
             author: None,
             published_at: None,
+            enrichments: HashMap::new(),
         }
     }
 
@@ -493,6 +494,68 @@ mod tests {
         assert_eq!(listed.len(), 3);
         assert!(listed.iter().all(|e| e.state == EntryState::New));
         assert!(listed.iter().all(|e| !e.displayed_in_top_n));
+    }
+
+    #[test]
+    fn upsert_entries_persists_and_updates_enrichments() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        let mut first = new_entry(source_id, "a", "Entry A");
+        first
+            .enrichments
+            .insert("youtube_view_count".into(), "42".into());
+        first
+            .enrichments
+            .insert("youtube_duration".into(), "PT3M14S".into());
+
+        assert_eq!(storage.upsert_entries(&[first]).unwrap(), 1);
+
+        let entry_id: i64 = storage
+            .conn
+            .query_row(
+                "SELECT id FROM entries WHERE source_id = ?1 AND external_id = ?2",
+                params![source_id, "a"],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let mut updated = new_entry(source_id, "a", "Entry A");
+        updated
+            .enrichments
+            .insert("youtube_view_count".into(), "100".into());
+        updated
+            .enrichments
+            .insert("youtube_like_count".into(), "7".into());
+
+        assert_eq!(storage.upsert_entries(&[updated]).unwrap(), 0);
+
+        let mut stmt = storage
+            .conn
+            .prepare("SELECT key, value FROM enrichments WHERE entry_id = ?1 ORDER BY key")
+            .unwrap();
+        let enrichments = stmt
+            .query_map([entry_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<HashMap<_, _>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            enrichments.get("youtube_duration").map(|s| s.as_str()),
+            Some("PT3M14S")
+        );
+        assert_eq!(
+            enrichments.get("youtube_view_count").map(|s| s.as_str()),
+            Some("100")
+        );
+        assert_eq!(
+            enrichments.get("youtube_like_count").map(|s| s.as_str()),
+            Some("7")
+        );
     }
 
     #[test]

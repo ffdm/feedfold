@@ -11,6 +11,7 @@ description = "Concrete SourceAdapter implementations (RSS, Atom, YouTube) for f
 feedfold-core = { workspace = true }
 reqwest       = { workspace = true }
 feed-rs       = { workspace = true }
+serde         = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
