@@ -309,6 +309,14 @@ impl Storage {
         Ok(())
     }
 
+    pub fn set_entry_state(&mut self, id: i64, state: EntryState) -> Result<(), StorageError> {
+        self.conn.execute(
+            "UPDATE entries SET state = ?1 WHERE id = ?2",
+            params![state, id],
+        )?;
+        Ok(())
+    }
+
     pub fn list_top_n_entries(&self) -> Result<Vec<Entry>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_id, external_id, title, summary, url, thumbnail_url, \

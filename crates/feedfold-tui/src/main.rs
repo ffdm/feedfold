@@ -18,7 +18,7 @@ use ratatui::{
 
 use feedfold_adapters::RssAdapter;
 use feedfold_core::adapter::SourceAdapter;
-use feedfold_core::storage::{Entry, NewEntry, NewSource, Storage};
+use feedfold_core::storage::{Entry, EntryState, NewEntry, NewSource, Storage};
 use feedfold_core::VERSION;
 
 #[derive(Debug, Parser)]
@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
 
 async fn run_tui() -> Result<()> {
     let db_path = Storage::default_path().context("resolving database path")?;
-    let storage = Storage::open(&db_path)
+    let mut storage = Storage::open(&db_path)
         .with_context(|| format!("opening database at {}", db_path.display()))?;
 
     let entries = storage.list_top_n_entries()?;
@@ -64,7 +64,7 @@ async fn run_tui() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(entries);
-    let res = run_app(&mut terminal, &mut app);
+    let res = run_app(&mut terminal, &mut app, &mut storage);
 
     // restore terminal
     disable_raw_mode()?;
@@ -123,7 +123,7 @@ impl App {
     }
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App) -> Result<()> {
+fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App, storage: &mut Storage) -> Result<()> {
     loop {
         terminal.draw(|f| ui(f, app))?;
 
@@ -135,8 +135,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut
                     KeyCode::Char('k') | KeyCode::Up => app.previous(),
                     KeyCode::Enter => {
                         if let Some(i) = app.state.selected() {
-                            if let Some(entry) = app.entries.get(i) {
+                            if let Some(entry) = app.entries.get_mut(i) {
                                 let _ = open::that(&entry.url);
+                                if entry.state == EntryState::New {
+                                    entry.state = EntryState::Viewed;
+                                    let _ = storage.set_entry_state(entry.id, EntryState::Viewed);
+                                }
                             }
                         }
                     }
@@ -159,9 +163,14 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .map(|entry| {
             let title = entry.title.clone();
             let source = entry.author.clone().unwrap_or_else(|| "Unknown".to_string());
+            let title_style = if entry.state == EntryState::New {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
             let line = Line::from(vec![
                 Span::styled(format!("[{}] ", source), Style::default().fg(Color::DarkGray)),
-                Span::raw(title),
+                Span::styled(title, title_style),
             ]);
             ListItem::new(line)
         })
