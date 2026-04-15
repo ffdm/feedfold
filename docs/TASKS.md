@@ -45,7 +45,7 @@ Last updated: 2026-04-14
 ## Phase 4: AI ranking
 
 - [x] 4.1 `ClaudeRanker` calling the Anthropic API
-- [~] 4.2 Interests prompt loaded from config
+- [x] 4.2 Interests prompt loaded from config
 - [ ] 4.3 Rating history fed as context
 - [ ] 4.4 Runtime switch between ranker implementations
 

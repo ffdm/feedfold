@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use feedfold_core::config::Config;
 use feedfold_core::ranker::Score;
 use feedfold_core::storage::Entry;
 use reqwest::Client;
@@ -17,11 +18,16 @@ pub struct ClaudeRanker {
     api_url: String,
     model: String,
     system_prompt: String,
+    interests: String,
 }
 
 impl ClaudeRanker {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self::with_client(Client::new(), api_key)
+    }
+
+    pub fn from_config(api_key: impl Into<String>, config: &Config) -> Self {
+        Self::new(api_key).with_interests(&config.ai.interests)
     }
 
     pub fn with_client(client: Client, api_key: impl Into<String>) -> Self {
@@ -31,6 +37,7 @@ impl ClaudeRanker {
             api_url: ANTHROPIC_MESSAGES_API_URL.into(),
             model: DEFAULT_MODEL.into(),
             system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
+            interests: String::new(),
         }
     }
 
@@ -46,6 +53,11 @@ impl ClaudeRanker {
 
     pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
         self.system_prompt = system_prompt.into();
+        self
+    }
+
+    pub fn with_interests(mut self, interests: impl Into<String>) -> Self {
+        self.interests = interests.into();
         self
     }
 
@@ -67,7 +79,7 @@ impl ClaudeRanker {
                 model: self.model.clone(),
                 max_tokens: 256,
                 temperature: 0.0,
-                system: self.system_prompt.clone(),
+                system: build_system_prompt(&self.system_prompt, &self.interests),
                 messages: vec![Message {
                     role: "user",
                     content: build_user_prompt(entries, top_n),
@@ -144,6 +156,15 @@ struct ContentBlock {
 #[derive(Debug, Deserialize)]
 struct RankingResponse {
     ranked_entry_ids: Vec<i64>,
+}
+
+fn build_system_prompt(system_prompt: &str, interests: &str) -> String {
+    let interests = interests.trim();
+    if interests.is_empty() {
+        return system_prompt.to_string();
+    }
+
+    format!("{system_prompt}\n\nReader interests:\n{interests}")
 }
 
 fn build_user_prompt(entries: &[Entry], top_n: usize) -> String {
@@ -238,7 +259,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
-    use feedfold_core::config::AdapterType;
+    use feedfold_core::config::{AdapterType, Config};
     use feedfold_core::storage::{NewEntry, NewSource, Storage};
 
     #[tokio::test]
@@ -282,6 +303,7 @@ mod tests {
         assert_eq!(body["model"], "claude-test");
         assert_eq!(body["max_tokens"], 256);
         assert_eq!(body["temperature"], 0.0);
+        assert_eq!(body["system"], DEFAULT_SYSTEM_PROMPT);
         assert!(body["messages"][0]["content"]
             .as_str()
             .unwrap()
@@ -322,6 +344,46 @@ mod tests {
     async fn claude_ranker_skips_network_for_empty_entries() {
         let scores = ClaudeRanker::new("test-key").rank(&[], 3).await.unwrap();
         assert!(scores.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claude_ranker_loads_interests_from_config() {
+        let (entries, _) = sample_entries();
+        let response_body = serde_json::json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": "{\"ranked_entry_ids\":[2,1]}"
+                }
+            ]
+        })
+        .to_string();
+        let (server_url, request_rx) = spawn_test_server(response_body).await;
+        let config = Config::parse(
+            r#"
+[ai]
+interests = """
+Rust internals and thoughtful essays.
+Skip product launches.
+"""
+"#,
+        )
+        .unwrap();
+
+        ClaudeRanker::from_config("test-key", &config)
+            .with_api_url(server_url)
+            .rank(&entries, 1)
+            .await
+            .unwrap();
+
+        let request = request_rx.await.unwrap();
+        let body: Value = serde_json::from_str(&request.body).unwrap();
+        let system = body["system"].as_str().unwrap();
+
+        assert!(system.contains(DEFAULT_SYSTEM_PROMPT));
+        assert!(system.contains(
+            "Reader interests:\nRust internals and thoughtful essays.\nSkip product launches."
+        ));
     }
 
     async fn spawn_test_server(
