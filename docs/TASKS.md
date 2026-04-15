@@ -36,7 +36,7 @@ Last updated: 2026-04-14
 
 ## Phase 3: Ratings, overflow, and search
 
-- [~] 3.1 1–5 star rating keybind and storage
+- [x] 3.1 1–5 star rating keybind and storage
 - [ ] 3.2 "Viewed" view with today's counter
 - [ ] 3.3 "Overflow" view for unviewed non-top-N entries
 - [ ] 3.4 Starring

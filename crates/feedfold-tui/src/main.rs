@@ -185,6 +185,10 @@ impl App {
         self.state.selected().and_then(|i| self.entries.get(i))
     }
 
+    fn selected_entry_mut(&mut self) -> Option<&mut Entry> {
+        self.state.selected().and_then(|i| self.entries.get_mut(i))
+    }
+
     fn selected_thumbnail_status(&self) -> Option<&ThumbnailStatus> {
         let url = self.selected_entry()?.thumbnail_url.as_ref()?;
         self.thumbnail_cache.get(url)
@@ -225,7 +229,8 @@ impl App {
         }
 
         let path = thumbnail_cache_path(&self.thumbnail_dir, &url);
-        self.thumbnail_cache.insert(url.clone(), ThumbnailStatus::Loading);
+        self.thumbnail_cache
+            .insert(url.clone(), ThumbnailStatus::Loading);
         let tx = self.thumbnail_tx.clone();
         thread::spawn(move || {
             let result = download_thumbnail(&url, &path)
@@ -286,6 +291,14 @@ fn run_app(
                         app.previous();
                         needs_redraw = true;
                     }
+                    KeyCode::Char(c @ '1'..='5') => {
+                        let rating = c.to_digit(10).expect("digit key") as u8;
+                        if let Some(entry) = app.selected_entry_mut() {
+                            storage.set_entry_rating(entry.id, rating)?;
+                            entry.rating = Some(rating);
+                            needs_redraw = true;
+                        }
+                    }
                     KeyCode::Enter => {
                         if let Some(i) = app.state.selected() {
                             if let Some(entry) = app.entries.get_mut(i) {
@@ -312,7 +325,10 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .entries
         .iter()
         .map(|entry| {
-            let source = entry.author.clone().unwrap_or_else(|| "Unknown".to_string());
+            let source = entry
+                .author
+                .clone()
+                .unwrap_or_else(|| "Unknown".to_string());
             let title_style = if entry.state == EntryState::New {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
@@ -395,8 +411,7 @@ fn build_thumbnail_status_text(
 
     match mode {
         ThumbnailMode::TextFallback => {
-            "Thumbnail available on image-capable terminals. Showing text-only detail."
-                .to_string()
+            "Thumbnail available on image-capable terminals. Showing text-only detail.".to_string()
         }
         ThumbnailMode::Viuer => match status {
             Some(ThumbnailStatus::Ready(_)) => String::new(),
@@ -417,6 +432,11 @@ fn build_summary_text(entry: Option<&Entry>) -> String {
     if let Some(date) = entry.published_at {
         text.push_str(&format!("Published: {}\n", date.to_rfc2822()));
     }
+    let rating = entry
+        .rating
+        .map(|rating| rating.to_string())
+        .unwrap_or_else(|| "unrated".to_string());
+    text.push_str(&format!("Rating: {rating}\n"));
     text.push('\n');
     text.push_str(entry.summary.as_deref().unwrap_or("No summary available."));
     text
@@ -430,15 +450,21 @@ fn draw_selected_thumbnail(
         return Ok(false);
     }
 
-    let Some(path) = app.selected_thumbnail_status().and_then(|status| match status {
-        ThumbnailStatus::Ready(path) => Some(path.clone()),
-        ThumbnailStatus::Loading | ThumbnailStatus::Failed(_) => None,
-    }) else {
+    let Some(path) = app
+        .selected_thumbnail_status()
+        .and_then(|status| match status {
+            ThumbnailStatus::Ready(path) => Some(path.clone()),
+            ThumbnailStatus::Loading | ThumbnailStatus::Failed(_) => None,
+        })
+    else {
         return Ok(false);
     };
 
     let (_, detail_area) = main_sections(terminal.size()?.into());
-    let detail_inner = Block::default().borders(Borders::ALL).title("Detail").inner(detail_area);
+    let detail_inner = Block::default()
+        .borders(Borders::ALL)
+        .title("Detail")
+        .inner(detail_area);
     let (thumbnail_area, _) = detail_sections(detail_inner);
     if thumbnail_area.width == 0 || thumbnail_area.height == 0 {
         return Ok(false);
@@ -606,7 +632,18 @@ mod tests {
         assert!(text.contains("Title: Feedfold ships thumbnails"));
         assert!(text.contains("URL: https://example.com/posts/1"));
         assert!(text.contains("Published: Tue, 2 Jan 2024 03:04:05 +0000"));
+        assert!(text.contains("Rating: unrated"));
         assert!(text.contains("Selected entries can show inline thumbnails."));
+    }
+
+    #[test]
+    fn summary_text_shows_rating_when_present() {
+        let mut entry = sample_entry();
+        entry.rating = Some(5);
+
+        let text = build_summary_text(Some(&entry));
+
+        assert!(text.contains("Rating: 5"));
     }
 
     #[test]

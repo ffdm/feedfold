@@ -118,6 +118,9 @@ pub enum StorageError {
     #[error("no user data directory could be determined for this platform")]
     NoDataDir,
 
+    #[error("rating must be between 1 and 5, got {0}")]
+    InvalidRating(u8),
+
     #[error("opening database at {path}")]
     Open {
         path: PathBuf,
@@ -374,6 +377,18 @@ impl Storage {
         self.conn.execute(
             "UPDATE entries SET state = ?1 WHERE id = ?2",
             params![state, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_entry_rating(&mut self, id: i64, rating: u8) -> Result<(), StorageError> {
+        if !(1..=5).contains(&rating) {
+            return Err(StorageError::InvalidRating(rating));
+        }
+
+        self.conn.execute(
+            "UPDATE entries SET rating = ?1 WHERE id = ?2",
+            params![rating, id],
         )?;
         Ok(())
     }
@@ -723,5 +738,51 @@ mod tests {
         let top = storage.list_top_n_entries().unwrap();
         assert_eq!(top[0].external_id, "high");
         assert_eq!(top[1].external_id, "low");
+    }
+
+    #[test]
+    fn set_entry_rating_persists_rating() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        storage
+            .upsert_entries(&[new_entry(source_id, "a", "Entry A")])
+            .unwrap();
+        let entry = storage
+            .list_entries_for_source(source_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        storage.set_entry_rating(entry.id, 4).unwrap();
+
+        let updated = storage
+            .list_entries_for_source(source_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(updated.rating, Some(4));
+    }
+
+    #[test]
+    fn set_entry_rating_rejects_out_of_range_values() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        storage
+            .upsert_entries(&[new_entry(source_id, "a", "Entry A")])
+            .unwrap();
+        let entry = storage
+            .list_entries_for_source(source_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let err = storage.set_entry_rating(entry.id, 0).unwrap_err();
+        assert!(matches!(err, StorageError::InvalidRating(0)));
     }
 }
