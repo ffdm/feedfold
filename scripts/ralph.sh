@@ -40,7 +40,7 @@ elif [[ "$AGENT" == "gemini" ]]; then
         agent_cmd+=(--model "$MODEL")
     fi
 elif [[ "$AGENT" == "codex" ]]; then
-    agent_cmd=(codex --yolo)
+    agent_cmd=(codex exec --dangerously-bypass-approvals-and-sandbox)
     if [[ -n "$MODEL" ]]; then
         agent_cmd+=(--model "$MODEL")
     fi
