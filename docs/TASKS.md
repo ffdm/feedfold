@@ -40,7 +40,7 @@ Last updated: 2026-04-14
 - [x] 3.2 "Viewed" view with today's counter
 - [x] 3.3 "Overflow" view for unviewed non-top-N entries
 - [x] 3.4 Starring
-- [ ] 3.5 SQLite FTS5 search over title and summary
+- [~] 3.5 SQLite FTS5 search over title and summary
 
 ## Phase 4: AI ranking
 
