@@ -299,6 +299,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "feedfold-adapters"
+version = "0.1.0"
+dependencies = [
+ "feed-rs",
+ "feedfold-core",
+ "reqwest",
+ "tokio",
+]
+
+[[package]]
 name = "feedfold-core"
 version = "0.1.0"
 dependencies = [
@@ -323,11 +333,9 @@ name = "feedfold-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
- "feed-rs",
+ "feedfold-adapters",
  "feedfold-core",
- "reqwest",
  "tokio",
 ]
 

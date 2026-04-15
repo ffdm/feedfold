@@ -1,0 +1,16 @@
+[package]
+name = "feedfold-adapters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Concrete SourceAdapter implementations (RSS, Atom, YouTube) for feedfold."
+
+[dependencies]
+feedfold-core = { workspace = true }
+reqwest       = { workspace = true }
+feed-rs       = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

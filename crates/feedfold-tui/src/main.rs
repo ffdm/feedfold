@@ -1,7 +1,7 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use feed_rs::parser;
-use feedfold_core::config::AdapterType;
+use feedfold_adapters::RssAdapter;
+use feedfold_core::adapter::SourceAdapter;
 use feedfold_core::storage::{NewEntry, NewSource, Storage};
 use feedfold_core::VERSION;
 
@@ -37,21 +37,15 @@ async fn main() -> Result<()> {
 }
 
 async fn add_feed(url: &str, override_name: Option<&str>) -> Result<()> {
-    let bytes = reqwest::get(url)
+    let adapter = RssAdapter::new();
+    let fetched = adapter
+        .fetch(url)
         .await
-        .with_context(|| format!("fetching {url}"))?
-        .error_for_status()
-        .with_context(|| format!("bad response from {url}"))?
-        .bytes()
-        .await
-        .with_context(|| format!("reading body from {url}"))?;
-
-    let feed = parser::parse(bytes.as_ref())
-        .with_context(|| format!("parsing feed body from {url}"))?;
+        .with_context(|| format!("fetching feed at {url}"))?;
 
     let name = override_name
         .map(str::to_owned)
-        .or_else(|| feed.title.as_ref().map(|t| t.content.clone()))
+        .or_else(|| fetched.name.clone())
         .unwrap_or_else(|| url.to_string());
 
     let db_path = Storage::default_path().context("resolving database path")?;
@@ -70,7 +64,7 @@ async fn add_feed(url: &str, override_name: Option<&str>) -> Result<()> {
             let new = NewSource {
                 name: name.clone(),
                 url: url.to_string(),
-                adapter: AdapterType::Rss,
+                adapter: adapter.kind(),
                 top_n_override: None,
             };
             let id = storage.insert_source(&new)?;
@@ -79,11 +73,11 @@ async fn add_feed(url: &str, override_name: Option<&str>) -> Result<()> {
         }
     };
 
-    let new_entries: Vec<NewEntry> = feed
+    let new_entries: Vec<NewEntry> = fetched
         .entries
-        .iter()
-        .map(|e| entry_from_feed(source_id, e))
-        .collect::<Result<Vec<_>>>()?;
+        .into_iter()
+        .map(|fe| fe.into_new_entry(source_id))
+        .collect();
 
     let inserted = storage.upsert_entries(&new_entries)?;
     println!(
@@ -92,38 +86,4 @@ async fn add_feed(url: &str, override_name: Option<&str>) -> Result<()> {
     );
 
     Ok(())
-}
-
-fn entry_from_feed(source_id: i64, entry: &feed_rs::model::Entry) -> Result<NewEntry> {
-    let url = entry
-        .links
-        .first()
-        .map(|l| l.href.clone())
-        .ok_or_else(|| anyhow!("entry {} has no link", entry.id))?;
-
-    let title = entry
-        .title
-        .as_ref()
-        .map(|t| t.content.clone())
-        .unwrap_or_else(|| "(untitled)".to_string());
-
-    let summary = entry.summary.as_ref().map(|t| t.content.clone());
-    let author = entry.authors.first().map(|p| p.name.clone());
-    let thumbnail_url = entry
-        .media
-        .iter()
-        .flat_map(|m| m.thumbnails.iter())
-        .next()
-        .map(|t| t.image.uri.clone());
-
-    Ok(NewEntry {
-        source_id,
-        external_id: entry.id.clone(),
-        title,
-        summary,
-        url,
-        thumbnail_url,
-        author,
-        published_at: entry.published.or(entry.updated),
-    })
 }

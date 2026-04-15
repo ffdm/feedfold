@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/feedfold-core",
+    "crates/feedfold-adapters",
     "crates/feedfold-daemon",
     "crates/feedfold-tui",
 ]
@@ -15,7 +16,8 @@ repository = "https://github.com/ffdm/feedfold"
 rust-version = "1.75"
 
 [workspace.dependencies]
-feedfold-core = { path = "crates/feedfold-core" }
+feedfold-core     = { path = "crates/feedfold-core" }
+feedfold-adapters = { path = "crates/feedfold-adapters" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

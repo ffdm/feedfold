@@ -19,7 +19,7 @@ Last updated: 2026-04-14
 ## Phase 1: Daemon and TUI home view
 
 - [x] 1.1 `SourceAdapter` trait in `feedfold-core`
-- [~] 1.2 `RssAdapter` implementation
+- [x] 1.2 `RssAdapter` implementation
 - [ ] 1.3 Background daemon with scheduled polling via tokio
 - [ ] 1.4 `Ranker` trait and `RecencyRanker` implementation
 - [ ] 1.5 Minimal ratatui home view (`j/k/enter/q`) reading from storage

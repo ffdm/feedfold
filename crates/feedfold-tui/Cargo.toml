@@ -12,10 +12,8 @@ name = "feedfold"
 path = "src/main.rs"
 
 [dependencies]
-feedfold-core = { workspace = true }
-anyhow        = { workspace = true }
-tokio         = { workspace = true }
-reqwest       = { workspace = true }
-feed-rs       = { workspace = true }
-clap          = { workspace = true }
-chrono        = { workspace = true }
+feedfold-core     = { workspace = true }
+feedfold-adapters = { workspace = true }
+anyhow            = { workspace = true }
+tokio             = { workspace = true }
+clap              = { workspace = true }
