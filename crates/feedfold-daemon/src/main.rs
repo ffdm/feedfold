@@ -3,10 +3,12 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use feedfold_adapters::{RssAdapter, YoutubeAdapter};
 use feedfold_core::adapter::SourceAdapter;
-use feedfold_core::config::{AdapterType, Config};
-use feedfold_core::ranker::{PopularityRanker, RankContext, Ranker};
-use feedfold_core::storage::Storage;
-use tracing::{error, info};
+use feedfold_core::config::{AdapterType, Config, RankingMode};
+use feedfold_core::ranker::{
+    EntryEnrichments, PopularityRanker, RankContext, Ranker, RecencyRanker, Score,
+};
+use feedfold_core::storage::{Entry, Storage};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -44,17 +46,7 @@ async fn main() -> Result<()> {
         .filter(|value| !value.trim().is_empty())
         .map(YoutubeAdapter::with_api_key)
         .unwrap_or_default();
-    let ranker = PopularityRanker;
-    let default_top_n = config.general.default_top_n;
-
-    poll_all(
-        &mut storage,
-        &rss_adapter,
-        &youtube_adapter,
-        &ranker,
-        default_top_n,
-    )
-    .await;
+    poll_all(&mut storage, &rss_adapter, &youtube_adapter, &config).await;
 
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await;
@@ -62,7 +54,7 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                poll_all(&mut storage, &rss_adapter, &youtube_adapter, &ranker, default_top_n).await;
+                poll_all(&mut storage, &rss_adapter, &youtube_adapter, &config).await;
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("Shutting down");
@@ -78,8 +70,7 @@ async fn poll_all(
     storage: &mut Storage,
     rss_adapter: &RssAdapter,
     youtube_adapter: &YoutubeAdapter,
-    ranker: &impl Ranker,
-    default_top_n: u32,
+    config: &Config,
 ) {
     let sources = match storage.list_sources() {
         Ok(s) => s,
@@ -126,7 +117,10 @@ async fn poll_all(
             }
         }
 
-        let top_n = source.top_n_override.unwrap_or(default_top_n) as usize;
+        let top_n = source
+            .top_n_override
+            .unwrap_or(config.general.default_top_n) as usize;
+        let ranking_mode = effective_ranking_mode(config, &source.name, &source.url);
         match storage.list_entries_for_source(source.id) {
             Ok(entries) => {
                 let enrichments = match storage.list_enrichments_for_source(source.id) {
@@ -139,7 +133,7 @@ async fn poll_all(
                         continue;
                     }
                 };
-                let scores = ranker.rank(&entries, &RankContext { top_n, enrichments });
+                let scores = rank_entries(&entries, top_n, enrichments, ranking_mode);
                 if let Err(e) = storage.apply_ranking(source.id, &scores, top_n) {
                     error!("{}: ranking update failed: {e}", source.name);
                 }
@@ -148,5 +142,98 @@ async fn poll_all(
                 error!("{}: failed to load entries for ranking: {e}", source.name);
             }
         }
+    }
+}
+
+fn effective_ranking_mode(config: &Config, source_name: &str, source_url: &str) -> RankingMode {
+    match configured_ranking_mode(config, source_url) {
+        RankingMode::Claude => {
+            warn!("{source_name}: ranking mode \"claude\" is not implemented yet, using recency");
+            RankingMode::Recency
+        }
+        mode => mode,
+    }
+}
+
+fn configured_ranking_mode(config: &Config, source_url: &str) -> RankingMode {
+    config
+        .sources
+        .iter()
+        .find(|source| source.url == source_url)
+        .and_then(|source| source.ranking)
+        .unwrap_or(config.ranking.mode)
+}
+
+fn rank_entries(
+    entries: &[Entry],
+    top_n: usize,
+    enrichments: EntryEnrichments,
+    mode: RankingMode,
+) -> Vec<Score> {
+    let ctx = RankContext { top_n, enrichments };
+    match mode {
+        RankingMode::Recency => RecencyRanker.rank(entries, &ctx),
+        RankingMode::Popularity => PopularityRanker.rank(entries, &ctx),
+        RankingMode::Claude => unreachable!("claude mode should be resolved before ranking"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_config(raw: &str) -> Config {
+        Config::parse(raw).expect("config parses")
+    }
+
+    #[test]
+    fn configured_ranking_mode_uses_global_default() {
+        let config = parse_config(
+            r#"
+[ranking]
+mode = "popularity"
+"#,
+        );
+
+        assert_eq!(
+            configured_ranking_mode(&config, "https://example.com/feed.xml"),
+            RankingMode::Popularity
+        );
+    }
+
+    #[test]
+    fn configured_ranking_mode_prefers_source_override() {
+        let config = parse_config(
+            r#"
+[ranking]
+mode = "recency"
+
+[[sources]]
+name = "Videos"
+url = "https://example.com/feed.xml"
+adapter = "youtube"
+ranking = "popularity"
+"#,
+        );
+
+        assert_eq!(
+            configured_ranking_mode(&config, "https://example.com/feed.xml"),
+            RankingMode::Popularity
+        );
+    }
+
+    #[test]
+    fn effective_ranking_mode_falls_back_from_claude() {
+        let config = parse_config(
+            r#"
+[ranking]
+mode = "claude"
+"#,
+        );
+
+        assert_eq!(
+            effective_ranking_mode(&config, "Example", "https://example.com/feed.xml"),
+            RankingMode::Recency
+        );
     }
 }

@@ -75,6 +75,8 @@ pub struct Source {
     pub adapter: AdapterType,
     #[serde(default)]
     pub top_n: Option<u32>,
+    #[serde(default)]
+    pub ranking: Option<RankingMode>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
@@ -173,12 +175,14 @@ interests = "Rust and systems papers."
 name    = "Simon Willison"
 url     = "https://simonwillison.net/atom/everything/"
 adapter = "rss"
+ranking = "recency"
 
 [[sources]]
 name    = "Fireship"
 url     = "https://www.youtube.com/feeds/videos.xml?channel_id=UCsBjURrPoezykLs9EqgamOA"
 adapter = "youtube"
 top_n   = 10
+ranking = "popularity"
 "#;
 
     #[test]
@@ -195,11 +199,13 @@ top_n   = 10
         assert_eq!(simon.name, "Simon Willison");
         assert_eq!(simon.adapter, AdapterType::Rss);
         assert_eq!(simon.top_n, None);
+        assert_eq!(simon.ranking, Some(RankingMode::Recency));
 
         let fireship = &config.sources[1];
         assert_eq!(fireship.name, "Fireship");
         assert_eq!(fireship.adapter, AdapterType::Youtube);
         assert_eq!(fireship.top_n, Some(10));
+        assert_eq!(fireship.ranking, Some(RankingMode::Popularity));
     }
 
     #[test]
@@ -225,5 +231,20 @@ adapter = "rss"
 
         assert_eq!(config.sources.len(), 1);
         assert_eq!(config.sources[0].top_n, None);
+        assert_eq!(config.sources[0].ranking, None);
+    }
+
+    #[test]
+    fn per_source_ranking_defaults_to_none() {
+        let raw = r#"
+[[sources]]
+name    = "A Blog"
+url     = "https://example.com/feed.xml"
+adapter = "rss"
+"#;
+        let config = Config::parse(raw).expect("parses");
+
+        assert_eq!(config.sources.len(), 1);
+        assert_eq!(config.sources[0].ranking, None);
     }
 }

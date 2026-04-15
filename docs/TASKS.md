@@ -32,7 +32,7 @@ Last updated: 2026-04-14
 - [x] 2.2 YouTube Data API v3 enrichment (batched `videos.list`)
 - [x] 2.3 `PopularityRanker` using enrichments
 - [x] 2.4 Kitty-protocol thumbnails via `viuer` with text fallback
-- [~] 2.5 Per-source ranking mode override in config
+- [x] 2.5 Per-source ranking mode override in config
 
 ## Phase 3: Ratings, overflow, and search
 
