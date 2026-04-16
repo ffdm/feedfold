@@ -263,12 +263,20 @@ impl Storage {
                 step: "search schema v1",
                 source,
             })?;
-        conn.execute("INSERT INTO entries_fts(entries_fts) VALUES('rebuild')", [])
+        Ok(Self { conn })
+    }
+
+    /// Rebuild the FTS5 index from scratch. Only needed after manual schema
+    /// changes or suspected index corruption; normal inserts/updates are kept
+    /// in sync by triggers.
+    pub fn rebuild_search_index(&self) -> Result<(), StorageError> {
+        self.conn
+            .execute("INSERT INTO entries_fts(entries_fts) VALUES('rebuild')", [])
             .map_err(|source| StorageError::Migration {
                 step: "search index rebuild",
                 source,
             })?;
-        Ok(Self { conn })
+        Ok(())
     }
 
     pub fn insert_source(&self, new: &NewSource) -> Result<i64, StorageError> {

@@ -39,9 +39,12 @@ async fn main() -> Result<()> {
 
     let config = match Config::load() {
         Ok(c) => c,
-        Err(_) => {
-            info!("No config file found, using defaults");
+        Err(feedfold_core::config::ConfigError::NotFound(path)) => {
+            info!("No config file at {}, using defaults", path.display());
             Config::default()
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(e).context("loading config"));
         }
     };
 

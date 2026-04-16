@@ -628,9 +628,9 @@ fn build_thumbnail_status_text(
         return String::new();
     };
 
-    let Some(_) = entry.thumbnail_url.as_ref() else {
+    if entry.thumbnail_url.is_none() {
         return "No thumbnail available.".to_string();
-    };
+    }
 
     match mode {
         ThumbnailMode::TextFallback => {
