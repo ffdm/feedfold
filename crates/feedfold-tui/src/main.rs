@@ -776,13 +776,24 @@ fn adapter_for_url(url: &str) -> AdapterType {
     }
 }
 
+fn youtube_adapter_from_env() -> YoutubeAdapter {
+    match std::env::var("YOUTUBE_API_KEY")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        Some(key) => YoutubeAdapter::with_api_key(key),
+        None => YoutubeAdapter::new(),
+    }
+}
+
 async fn fetch_feed_for(kind: AdapterType, url: &str) -> Result<feedfold_core::adapter::FetchedFeed> {
     match kind {
         AdapterType::Rss => RssAdapter::new()
             .fetch(url)
             .await
             .with_context(|| format!("fetching feed at {url}")),
-        AdapterType::Youtube => YoutubeAdapter::default()
+        AdapterType::Youtube => youtube_adapter_from_env()
             .fetch(url)
             .await
             .with_context(|| format!("fetching YouTube feed at {url}")),

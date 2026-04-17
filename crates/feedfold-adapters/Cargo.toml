@@ -11,6 +11,7 @@ description = "Concrete SourceAdapter implementations (RSS, Atom, YouTube) for f
 feedfold-core = { workspace = true }
 reqwest       = { workspace = true }
 feed-rs       = { workspace = true }
+chrono        = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 thiserror     = { workspace = true }
