@@ -75,6 +75,19 @@ pub struct Entry {
     pub displayed_in_top_n: bool,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct ChannelStats {
+    pub total: usize,
+    pub new_count: usize,
+    pub viewed_count: usize,
+    pub ignored_count: usize,
+    pub starred_count: usize,
+    pub rating_total: u32,
+    pub rating_n: u32,
+    pub latest_title: Option<String>,
+    pub latest_published: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewEntry {
     pub source_id: i64,
@@ -185,6 +198,11 @@ CREATE TABLE IF NOT EXISTS daily_views (
     entry_id  INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
     viewed_at TEXT    NOT NULL,
     PRIMARY KEY (date, entry_id)
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 "#;
 
@@ -486,11 +504,90 @@ impl Storage {
         Ok(())
     }
 
+    pub fn clear_entry_rating(&mut self, id: i64) -> Result<(), StorageError> {
+        self.conn.execute(
+            "UPDATE entries SET rating = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     pub fn record_entry_view(&mut self, id: i64) -> Result<(), StorageError> {
         let now = Local::now();
         let viewed_at = now.with_timezone(&Utc);
         let viewed_on = now.date_naive();
         self.record_entry_view_at(id, viewed_at, viewed_on)
+    }
+
+    pub fn channel_stats(&self) -> Result<HashMap<i64, ChannelStats>, StorageError> {
+        let mut stats: HashMap<i64, ChannelStats> = HashMap::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT source_id, state, rating, title, published_at \
+             FROM entries",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, EntryState>(1)?,
+                row.get::<_, Option<u8>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<DateTime<Utc>>>(4)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (source_id, state, rating, title, published_at) = row?;
+            let s = stats.entry(source_id).or_default();
+            s.total += 1;
+            match state {
+                EntryState::New => s.new_count += 1,
+                EntryState::Viewed => s.viewed_count += 1,
+                EntryState::Ignored => s.ignored_count += 1,
+                EntryState::Starred => s.starred_count += 1,
+            }
+            if let Some(r) = rating {
+                s.rating_total += u32::from(r);
+                s.rating_n += 1;
+            }
+            if let Some(at) = published_at {
+                if s.latest_published.map_or(true, |cur| at > cur) {
+                    s.latest_published = Some(at);
+                    s.latest_title = Some(title);
+                }
+            }
+        }
+
+        Ok(stats)
+    }
+
+    pub fn set_last_poll_at(&self, at: DateTime<Utc>) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('last_poll_at', ?1) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![at],
+        )?;
+        Ok(())
+    }
+
+    pub fn last_poll_at(&self) -> Result<Option<DateTime<Utc>>, StorageError> {
+        let result: Option<DateTime<Utc>> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'last_poll_at'",
+                [],
+                |row| row.get::<_, DateTime<Utc>>(0),
+            )
+            .optional()?;
+        Ok(result)
+    }
+
+    pub fn delete_daily_view_today(&mut self, id: i64) -> Result<(), StorageError> {
+        let today = Local::now().date_naive();
+        self.conn.execute(
+            "DELETE FROM daily_views WHERE entry_id = ?1 AND date = ?2",
+            params![id, today.to_string()],
+        )?;
+        Ok(())
     }
 
     pub fn count_entries_viewed_today(&self) -> Result<usize, StorageError> {

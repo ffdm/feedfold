@@ -25,6 +25,8 @@ pub struct General {
     pub default_top_n: u32,
     #[serde(default = "default_poll_interval_mins")]
     pub poll_interval_mins: u32,
+    #[serde(default)]
+    pub channel_sort: ChannelSort,
 }
 
 impl Default for General {
@@ -32,7 +34,53 @@ impl Default for General {
         Self {
             default_top_n: default_top_n(),
             poll_interval_mins: default_poll_interval_mins(),
+            channel_sort: ChannelSort::default(),
         }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelSort {
+    #[default]
+    Alphabetical,
+    MostRecent,
+    TopRated,
+    MostNew,
+}
+
+impl ChannelSort {
+    pub fn cycle_next(self) -> Self {
+        match self {
+            Self::Alphabetical => Self::MostRecent,
+            Self::MostRecent => Self::TopRated,
+            Self::TopRated => Self::MostNew,
+            Self::MostNew => Self::Alphabetical,
+        }
+    }
+
+    pub fn cycle_prev(self) -> Self {
+        match self {
+            Self::Alphabetical => Self::MostNew,
+            Self::MostRecent => Self::Alphabetical,
+            Self::TopRated => Self::MostRecent,
+            Self::MostNew => Self::TopRated,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Alphabetical => "A-Z",
+            Self::MostRecent => "recent",
+            Self::TopRated => "rating",
+            Self::MostNew => "unread",
+        }
+    }
+}
+
+impl std::fmt::Display for ChannelSort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
     }
 }
 

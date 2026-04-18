@@ -109,6 +109,10 @@ async fn poll_all(
 
     info!("Polling {} source(s)", sources.len());
 
+    if let Err(e) = storage.set_last_poll_at(chrono::Utc::now()) {
+        warn!("Failed to record last poll time: {e}");
+    }
+
     for source in &sources {
         let fetch_result = match source.adapter {
             AdapterType::Rss => rss_adapter.fetch(&source.url).await,
@@ -155,9 +159,19 @@ async fn poll_all(
                         continue;
                     }
                 };
+                let candidates: Vec<Entry> = entries
+                    .into_iter()
+                    .filter(|e| {
+                        matches!(
+                            e.state,
+                            feedfold_core::storage::EntryState::New
+                                | feedfold_core::storage::EntryState::Starred
+                        )
+                    })
+                    .collect();
                 let scores = rank_entries(
                     storage,
-                    &entries,
+                    &candidates,
                     top_n,
                     enrichments,
                     ranking_mode,

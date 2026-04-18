@@ -6,7 +6,7 @@ commit again.
 
 Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
-Last updated: 2026-04-15
+Last updated: 2026-04-17
 
 ## Phase 0: Foundations
 
@@ -53,7 +53,7 @@ Last updated: 2026-04-15
 
 - [x] 5.1 `feedfold import <opml>` bulk subscription import
 - [x] 5.2 `feedfold list` source inspector
-- [ ] 5.3 `feedfold remove <id|url>` source removal
+- [x] 5.3 `feedfold remove <id|url>` source removal
 - [ ] 5.4 `feedfold export` OPML export for backup
 - [ ] 5.5 First-run config bootstrap
 

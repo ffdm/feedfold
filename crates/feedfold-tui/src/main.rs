@@ -8,6 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Local, Utc};
 use clap::{Parser, Subcommand};
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -29,8 +30,10 @@ use feedfold_adapters::{
     YOUTUBE_VIEW_COUNT_KEY,
 };
 use feedfold_core::adapter::SourceAdapter;
-use feedfold_core::config::{AdapterType, Config, RankingMode};
-use feedfold_core::storage::{Entry, EntryState, NewEntry, NewSource, Source as DbSource, Storage};
+use feedfold_core::config::{AdapterType, ChannelSort, Config, RankingMode};
+use feedfold_core::storage::{
+    ChannelStats, Entry, EntryState, NewEntry, NewSource, Source as DbSource, Storage,
+};
 use feedfold_core::VERSION;
 
 mod opml;
@@ -61,6 +64,14 @@ enum Command {
     },
     /// List every source currently tracked in the database.
     List,
+    /// Remove a source by its numeric id or its URL.
+    Remove {
+        /// Source id (from `feedfold list`) or feed URL.
+        id_or_url: String,
+        /// Skip the confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +131,7 @@ struct SettingsState {
     selected: usize,
     top_n: u32,
     ranking_mode: RankingMode,
+    channel_sort: ChannelSort,
     poll_interval: u32,
     show_shorts: bool,
     show_live: bool,
@@ -132,6 +144,7 @@ impl SettingsState {
             selected: 0,
             top_n: config.general.default_top_n,
             ranking_mode: config.ranking.mode,
+            channel_sort: config.general.channel_sort,
             poll_interval: config.general.poll_interval_mins,
             show_shorts: config.youtube.show_shorts,
             show_live: config.youtube.show_live,
@@ -139,8 +152,8 @@ impl SettingsState {
         }
     }
 
-    const FIELD_COUNT: usize = 7;
-    const VIEW_IGNORED_FIELD: usize = 6;
+    const FIELD_COUNT: usize = 8;
+    const VIEW_IGNORED_FIELD: usize = 7;
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +187,7 @@ async fn main() -> Result<()> {
         Some(Command::Add { url, name }) => add_feed(&url, name.as_deref()).await,
         Some(Command::Import { path }) => import_opml(&path).await,
         Some(Command::List) => list_sources(),
+        Some(Command::Remove { id_or_url, yes }) => remove_source(&id_or_url, yes),
         None => run_tui().await,
     }
 }
@@ -197,7 +211,9 @@ async fn run_tui() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    let last_poll_at = storage.last_poll_at().ok().flatten();
     let mut app = App::new(entries, sources, config, detect_thumbnail_mode(), thumbnail_dir);
+    app.last_poll_at = last_poll_at;
     let _ = trigger_refresh(&mut app, &mut storage);
     let res = run_app(&mut terminal, &mut app, &mut storage);
 
@@ -217,21 +233,26 @@ fn trigger_refresh(app: &mut App, storage: &mut Storage) -> Result<()> {
 
         if let Ok(entries) = storage.list_entries_for_source(source.id) {
             if let Ok(enrichments) = storage.list_enrichments_for_source(source.id) {
+                let candidates: Vec<Entry> = entries
+                    .into_iter()
+                    .filter(|e| matches!(e.state, EntryState::New | EntryState::Starred))
+                    .collect();
                 let ctx = feedfold_core::ranker::RankContext {
                     top_n,
                     enrichments,
                 };
                 let scores = match mode {
-                    RankingMode::Recency => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::RecencyRanker, &entries, &ctx),
-                    RankingMode::Popularity => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::PopularityRanker, &entries, &ctx),
-                    RankingMode::Claude => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::RecencyRanker, &entries, &ctx),
+                    RankingMode::Recency => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::RecencyRanker, &candidates, &ctx),
+                    RankingMode::Popularity => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::PopularityRanker, &candidates, &ctx),
+                    RankingMode::Claude => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::RecencyRanker, &candidates, &ctx),
                 };
                 let _ = storage.apply_ranking(source.id, &scores, top_n);
             }
         }
     }
 
-    app.source_names = sources.into_iter().map(|s| (s.id, s.name)).collect();
+    app.sources = sources.into_iter().map(|s| (s.id, s)).collect();
+    let _ = storage.set_last_poll_at(Utc::now());
     refresh_view(app, storage)?;
     Ok(())
 }
@@ -252,8 +273,11 @@ struct App {
     entry_enrichments: HashMap<i64, HashMap<String, String>>,
     channel_rows: Vec<ChannelRow>,
     channels_expanded: HashSet<i64>,
-    source_names: HashMap<i64, String>,
+    sources: HashMap<i64, DbSource>,
+    channel_stats: HashMap<i64, ChannelStats>,
+    channel_sort: ChannelSort,
     viewed_today_count: usize,
+    last_poll_at: Option<DateTime<Utc>>,
     state: ListState,
     list_viewport_height: u16,
     pending_g: bool,
@@ -282,18 +306,19 @@ impl App {
         if !entries.is_empty() {
             state.select(Some(0));
         }
-        let source_names = sources
-            .into_iter()
-            .map(|s| (s.id, s.name))
-            .collect();
+        let sources = sources.into_iter().map(|s| (s.id, s)).collect();
+        let channel_sort = config.general.channel_sort;
         App {
             active_view: ActiveView::Home,
             entries,
             entry_enrichments: HashMap::new(),
             channel_rows: Vec::new(),
             channels_expanded: HashSet::new(),
-            source_names,
+            sources,
+            channel_stats: HashMap::new(),
+            channel_sort,
             viewed_today_count: 0,
+            last_poll_at: None,
             state,
             list_viewport_height: 0,
             pending_g: false,
@@ -408,9 +433,9 @@ impl App {
                 HEntry::Vacant(slot) => {
                     order.push(entry.source_id);
                     let name = self
-                        .source_names
+                        .sources
                         .get(&entry.source_id)
-                        .cloned()
+                        .map(|s| s.name.clone())
                         .or_else(|| entry.author.clone())
                         .unwrap_or_else(|| "Unknown".to_string());
                     slot.insert((name, vec![entry.clone()]));
@@ -420,6 +445,39 @@ impl App {
                 }
             }
         }
+
+        let sort = self.channel_sort;
+        let stats = &self.channel_stats;
+        order.sort_by(|a, b| {
+            let name_a = groups.get(a).map(|g| g.0.as_str()).unwrap_or("");
+            let name_b = groups.get(b).map(|g| g.0.as_str()).unwrap_or("");
+            let name_cmp = name_a.to_lowercase().cmp(&name_b.to_lowercase());
+            match sort {
+                ChannelSort::Alphabetical => name_cmp,
+                ChannelSort::MostRecent => {
+                    let at_a = stats.get(a).and_then(|s| s.latest_published);
+                    let at_b = stats.get(b).and_then(|s| s.latest_published);
+                    at_b.cmp(&at_a).then(name_cmp)
+                }
+                ChannelSort::TopRated => {
+                    let avg = |id: &i64| -> f64 {
+                        stats
+                            .get(id)
+                            .filter(|s| s.rating_n > 0)
+                            .map(|s| s.rating_total as f64 / s.rating_n as f64)
+                            .unwrap_or(-1.0)
+                    };
+                    avg(b)
+                        .partial_cmp(&avg(a))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(name_cmp)
+                }
+                ChannelSort::MostNew => {
+                    let new_count = |id: &i64| stats.get(id).map(|s| s.new_count).unwrap_or(0);
+                    new_count(b).cmp(&new_count(a)).then(name_cmp)
+                }
+            }
+        });
 
         let mut rows = Vec::new();
         for source_id in order {
@@ -482,10 +540,33 @@ impl App {
 
         match self.active_view {
             ActiveView::Home => "Home".to_string(),
-            ActiveView::Channels => "Channels".to_string(),
+            ActiveView::Channels => format!("Channels \u{2014} {}", self.channel_sort.label()),
             ActiveView::Viewed => format!("Viewed (today: {})", self.viewed_today_count),
             ActiveView::Overflow => "Overflow".to_string(),
             ActiveView::Ignored => "Ignored".to_string(),
+        }
+    }
+
+    fn next_refresh_at(&self) -> Option<DateTime<Utc>> {
+        let interval_mins = self.config.general.poll_interval_mins as i64;
+        self.last_poll_at
+            .map(|t| t + chrono::Duration::minutes(interval_mins))
+    }
+
+    fn next_refresh_label(&self) -> String {
+        let Some(next) = self.next_refresh_at() else {
+            return "next refresh pending".to_string();
+        };
+        let now = Utc::now();
+        let delta = next.signed_duration_since(now);
+        let local = next.with_timezone(&Local);
+        if delta.num_seconds() <= 0 {
+            format!("next refresh due ({})", local.format("%H:%M"))
+        } else if delta.num_minutes() < 60 {
+            let mins = delta.num_minutes().max(1);
+            format!("next refresh in {mins}m ({})", local.format("%H:%M"))
+        } else {
+            format!("next refresh at {}", local.format("%H:%M"))
         }
     }
 
@@ -712,10 +793,11 @@ fn run_app(
                             match settings.selected {
                                 0 => settings.top_n = settings.top_n.saturating_add(1).min(50),
                                 1 => settings.ranking_mode = settings.ranking_mode.cycle_next(),
-                                2 => settings.poll_interval = settings.poll_interval.saturating_add(5).min(1440),
-                                3 => settings.show_shorts = !settings.show_shorts,
-                                4 => settings.show_live = !settings.show_live,
-                                5 => settings.show_premieres = !settings.show_premieres,
+                                2 => settings.channel_sort = settings.channel_sort.cycle_next(),
+                                3 => settings.poll_interval = settings.poll_interval.saturating_add(5).min(1440),
+                                4 => settings.show_shorts = !settings.show_shorts,
+                                5 => settings.show_live = !settings.show_live,
+                                6 => settings.show_premieres = !settings.show_premieres,
                                 SettingsState::VIEW_IGNORED_FIELD => {
                                     app.overlay = Overlay::None;
                                     app.clear_search();
@@ -736,10 +818,11 @@ fn run_app(
                                         RankingMode::Claude => RankingMode::Popularity,
                                     };
                                 }
-                                2 => settings.poll_interval = settings.poll_interval.saturating_sub(5).max(5),
-                                3 => settings.show_shorts = !settings.show_shorts,
-                                4 => settings.show_live = !settings.show_live,
-                                5 => settings.show_premieres = !settings.show_premieres,
+                                2 => settings.channel_sort = settings.channel_sort.cycle_prev(),
+                                3 => settings.poll_interval = settings.poll_interval.saturating_sub(5).max(5),
+                                4 => settings.show_shorts = !settings.show_shorts,
+                                5 => settings.show_live = !settings.show_live,
+                                6 => settings.show_premieres = !settings.show_premieres,
                                 _ => {}
                             }
                             needs_redraw = true;
@@ -754,6 +837,8 @@ fn run_app(
                                 let settings = settings.clone();
                                 app.config.general.default_top_n = settings.top_n;
                                 app.config.ranking.mode = settings.ranking_mode;
+                                app.config.general.channel_sort = settings.channel_sort;
+                                app.channel_sort = settings.channel_sort;
                                 app.config.general.poll_interval_mins = settings.poll_interval;
                                 app.config.youtube.show_shorts = settings.show_shorts;
                                 app.config.youtube.show_live = settings.show_live;
@@ -825,7 +910,7 @@ fn run_app(
                                 let id = state.sources[state.selected].id;
                                 if storage.delete_source(id).is_ok() {
                                     if let Ok(sources) = storage.list_sources() {
-                                        app.source_names = sources.iter().map(|s| (s.id, s.name.clone())).collect();
+                                        app.sources = sources.iter().cloned().map(|s| (s.id, s)).collect();
                                         state.sources = sources;
                                         if state.selected >= state.sources.len() {
                                             state.selected = state.sources.len().saturating_sub(1);
@@ -878,7 +963,7 @@ fn run_app(
                                 let _ = storage.insert_source(&new_source);
                             }
                             if let Ok(sources) = storage.list_sources() {
-                                app.source_names = sources.iter().map(|s| (s.id, s.name.clone())).collect();
+                                app.sources = sources.iter().cloned().map(|s| (s.id, s)).collect();
                                 app.overlay = Overlay::ChannelsManager(ChannelsManagerState {
                                     sources,
                                     selected: 0,
@@ -981,7 +1066,8 @@ fn run_app(
                     KeyCode::Char('r') => {
                         trigger_refresh(app, storage)?;
                         needs_redraw = true;
-                    }                    KeyCode::Char('j') | KeyCode::Down => {
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
                         app.next();
                         needs_redraw = true;
                     }
@@ -1234,6 +1320,10 @@ fn refresh_view(app: &mut App, storage: &Storage) -> Result<()> {
     let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
     app.entry_enrichments = storage.get_enrichments_for_entries(&ids)?;
     app.replace_entries(entries);
+    app.last_poll_at = storage.last_poll_at().ok().flatten();
+    if app.active_view == ActiveView::Channels {
+        app.channel_stats = storage.channel_stats().unwrap_or_default();
+    }
     if app.active_view == ActiveView::Viewed {
         app.viewed_today_count = storage.count_entries_viewed_today()?;
     }
@@ -1441,9 +1531,23 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         ),
         Span::raw(" "),
     ]);
+    let refresh_title = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            app.next_refresh_label(),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(" "),
+    ])
+    .right_aligned();
 
     let items_list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(list_title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title_top(list_title)
+                .title_top(refresh_title),
+        )
         .highlight_style(Style::default().bg(Color::DarkGray))
         .highlight_symbol(" > ");
 
@@ -1461,13 +1565,23 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let detail_inner = detail_block.inner(detail_area);
     f.render_widget(detail_block, detail_area);
 
-    let show_thumbnail_area = app.thumbnail_mode == ThumbnailMode::Viuer
+    let channel_header_source = app.selected_channel_header_source();
+    let show_thumbnail_area = channel_header_source.is_none()
+        && app.thumbnail_mode == ThumbnailMode::Viuer
         && app
             .selected_entry()
             .and_then(|e| e.thumbnail_url.as_ref())
             .is_some();
 
-    if show_thumbnail_area {
+    if let Some(source_id) = channel_header_source {
+        if detail_inner.width > 0 && detail_inner.height > 0 {
+            let lines = build_channel_detail_lines(app, source_id);
+            f.render_widget(
+                Paragraph::new(lines).wrap(Wrap { trim: true }),
+                detail_inner,
+            );
+        }
+    } else if show_thumbnail_area {
         let (thumbnail_area, summary_area) = detail_sections(detail_inner);
         if thumbnail_area.width > 0 && thumbnail_area.height > 0 {
             let thumbnail_text = build_thumbnail_status_text(
@@ -1562,7 +1676,7 @@ fn bool_display(v: bool) -> &'static str {
 }
 
 fn draw_settings_overlay(f: &mut ratatui::Frame, settings: &SettingsState, area: Rect) {
-    let popup = centered_rect(54, 16, area);
+    let popup = centered_rect(54, 17, area);
     f.render_widget(ratatui::widgets::Clear, popup);
 
     let block = Block::default()
@@ -1579,6 +1693,7 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, settings: &SettingsState, area:
     let fields: Vec<(&str, String)> = vec![
         ("Top N", format!("\u{25c2} {} \u{25b8}", settings.top_n)),
         ("Ranking", format!("\u{25c2} {} \u{25b8}", settings.ranking_mode)),
+        ("Channel Sort", format!("\u{25c2} {} \u{25b8}", settings.channel_sort)),
         ("Poll (min)", format!("\u{25c2} {} \u{25b8}", settings.poll_interval)),
         ("Show Shorts", format!("[{}]", bool_display(settings.show_shorts))),
         ("Show Live", format!("[{}]", bool_display(settings.show_live))),
@@ -1772,6 +1887,28 @@ fn build_thumbnail_status_text(
     }
 }
 
+fn format_duration(seconds: u64) -> String {
+    let h = seconds / 3600;
+    let m = (seconds % 3600) / 60;
+    let s = seconds % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+fn entry_duration_label(
+    entry: &Entry,
+    enrichments: &HashMap<i64, HashMap<String, String>>,
+) -> Option<String> {
+    enrichments
+        .get(&entry.id)?
+        .get(YOUTUBE_DURATION_KEY)
+        .and_then(|raw| parse_iso8601_duration_seconds(raw))
+        .map(format_duration)
+}
+
 fn format_compact_count(n: u64) -> String {
     if n < 1_000 {
         n.to_string()
@@ -1797,6 +1934,110 @@ fn format_compact_count(n: u64) -> String {
             format!("{}.{}B", tenths / 10, tenths % 10)
         }
     }
+}
+
+fn build_channel_detail_lines(app: &App, source_id: i64) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let label = Style::default().fg(Color::Gray);
+    let accent = Style::default().fg(Color::Cyan);
+    let bold_white = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let default_stats = ChannelStats::default();
+    let stats = app.channel_stats.get(&source_id).unwrap_or(&default_stats);
+
+    let source = app.sources.get(&source_id);
+    let name = source
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| "Unknown channel".to_string());
+    let top_n = source
+        .and_then(|s| s.top_n_override)
+        .unwrap_or(app.config.general.default_top_n);
+    let adapter = source
+        .map(|s| match s.adapter {
+            AdapterType::Rss => "RSS",
+            AdapterType::Youtube => "YouTube",
+        })
+        .unwrap_or("?");
+    let url = source.map(|s| s.url.clone()).unwrap_or_default();
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    lines.push(Line::from(Span::styled(name, bold_white)));
+    if !url.is_empty() {
+        lines.push(Line::from(Span::styled(
+            url,
+            Style::default().fg(Color::Blue),
+        )));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(adapter.to_string(), accent),
+        Span::styled("  \u{00b7}  ", dim),
+        Span::styled(format!("top {top_n}"), label),
+    ]));
+
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled("Entries", label)));
+    lines.push(Line::from(vec![
+        Span::styled(format!("{}", stats.total), bold_white),
+        Span::styled(" total", dim),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{}", stats.new_count),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(" new  ", dim),
+        Span::styled(format!("{}", stats.viewed_count), label),
+        Span::styled(" viewed  ", dim),
+        Span::styled(format!("{}", stats.ignored_count), label),
+        Span::styled(" ignored  ", dim),
+        Span::styled(
+            format!("{}", stats.starred_count),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::styled(" starred", dim),
+    ]));
+
+    if stats.rating_n > 0 {
+        let avg = stats.rating_total as f64 / stats.rating_n as f64;
+        let filled = avg.round().clamp(0.0, 5.0) as usize;
+        let stars_filled = "\u{2605}".repeat(filled);
+        let stars_empty = "\u{2606}".repeat(5 - filled);
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Avg rating  ", label),
+            Span::styled(stars_filled, Style::default().fg(Color::Yellow)),
+            Span::styled(stars_empty, dim),
+            Span::styled(
+                format!("  {avg:.1}  ({} rated)", stats.rating_n),
+                dim,
+            ),
+        ]));
+    }
+
+    if let (Some(title), Some(at)) = (stats.latest_title.clone(), stats.latest_published) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Latest entry", label)));
+        lines.push(Line::from(Span::styled(title, bold_white)));
+        lines.push(Line::from(Span::styled(
+            at.with_timezone(&Local).format("%b %d, %Y  %H:%M").to_string(),
+            dim,
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        app.next_refresh_label(),
+        Style::default().fg(Color::Cyan),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Ignored/viewed entries return after the next refresh.",
+        dim,
+    )));
+
+    lines
 }
 
 fn build_detail_lines(
@@ -2259,6 +2500,54 @@ fn list_sources() -> Result<()> {
             source.url,
         );
     }
+    Ok(())
+}
+
+fn remove_source(id_or_url: &str, skip_confirm: bool) -> Result<()> {
+    let db_path = Storage::default_path().context("resolving database path")?;
+    let storage = Storage::open(&db_path)
+        .with_context(|| format!("opening database at {}", db_path.display()))?;
+
+    let trimmed = id_or_url.trim();
+    let target = if let Ok(id) = trimmed.parse::<i64>() {
+        storage
+            .list_sources()
+            .context("listing sources")?
+            .into_iter()
+            .find(|s| s.id == id)
+    } else {
+        storage
+            .source_by_url(trimmed)
+            .context("looking up source by url")?
+    };
+
+    let Some(source) = target else {
+        anyhow::bail!(
+            "No source matches {id_or_url:?}. Run `feedfold list` to see tracked sources."
+        );
+    };
+
+    if !skip_confirm {
+        print!(
+            "Remove [{}] {} ({})? This deletes all stored entries. [y/N]: ",
+            source.id, source.name, source.url
+        );
+        io::Write::flush(&mut io::stdout()).context("flushing stdout")?;
+        let mut answer = String::new();
+        io::stdin()
+            .read_line(&mut answer)
+            .context("reading confirmation")?;
+        let trimmed = answer.trim().to_ascii_lowercase();
+        if trimmed != "y" && trimmed != "yes" {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    storage
+        .delete_source(source.id)
+        .context("deleting source")?;
+    println!("Removed [{}] {} ({}).", source.id, source.name, source.url);
     Ok(())
 }
 
