@@ -1177,9 +1177,16 @@ fn filter_youtube_content(
         };
 
         if !config.youtube.show_shorts {
+            let title_lower = entry.title.to_lowercase();
+            let summary_lower = entry.summary.as_deref().unwrap_or("").to_lowercase();
+            
+            if title_lower.contains("#shorts") || summary_lower.contains("#shorts") {
+                return false;
+            }
+
             if let Some(duration) = entry_enrichments.get(YOUTUBE_DURATION_KEY) {
                 if let Some(seconds) = parse_iso8601_duration_seconds(duration) {
-                    if seconds <= 60 {
+                    if seconds <= 61 {
                         return false;
                     }
                 }
