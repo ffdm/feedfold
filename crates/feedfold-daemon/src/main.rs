@@ -62,9 +62,8 @@ async fn main() -> Result<()> {
     info!("Database: {}", db_path.display());
 
     let rss_adapter = RssAdapter::new();
-    let youtube_adapter = std::env::var("YOUTUBE_API_KEY")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    let youtube_adapter = config
+        .youtube_api_key()
         .map(YoutubeAdapter::with_api_key)
         .unwrap_or_default();
     let rankers = RuntimeRankers::from_env(&config);

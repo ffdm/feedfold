@@ -14,12 +14,13 @@ const YOUTUBE_PLAYLIST_ITEMS_API_URL: &str =
     "https://www.googleapis.com/youtube/v3/playlistItems";
 const YOUTUBE_VIDEOS_API_URL: &str = "https://www.googleapis.com/youtube/v3/videos";
 const YOUTUBE_BATCH_SIZE: usize = 50;
-const YOUTUBE_VIEW_COUNT_KEY: &str = "youtube_view_count";
+pub const YOUTUBE_VIEW_COUNT_KEY: &str = "youtube_view_count";
 const YOUTUBE_LIKE_COUNT_KEY: &str = "youtube_like_count";
 const YOUTUBE_COMMENT_COUNT_KEY: &str = "youtube_comment_count";
-const YOUTUBE_DURATION_KEY: &str = "youtube_duration";
+pub const YOUTUBE_DURATION_KEY: &str = "youtube_duration";
 const YOUTUBE_CHANNEL_ID_KEY: &str = "youtube_channel_id";
 const YOUTUBE_CHANNEL_TITLE_KEY: &str = "youtube_channel_title";
+pub const YOUTUBE_LIVE_BROADCAST_KEY: &str = "youtube_live_broadcast";
 
 pub struct YoutubeAdapter {
     rss: RssAdapter,
@@ -456,6 +457,8 @@ struct Snippet {
     channel_title: Option<String>,
     #[serde(default)]
     thumbnails: Option<Thumbnails>,
+    #[serde(default, rename = "liveBroadcastContent")]
+    live_broadcast_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -506,6 +509,7 @@ struct VideoEnrichment {
     channel_id: Option<String>,
     channel_title: Option<String>,
     thumbnail_url: Option<String>,
+    live_broadcast_content: Option<String>,
 }
 
 impl VideoEnrichment {
@@ -529,6 +533,9 @@ impl VideoEnrichment {
         }
         if let Some(value) = &self.channel_title {
             pairs.push((YOUTUBE_CHANNEL_TITLE_KEY.into(), value.clone()));
+        }
+        if let Some(value) = &self.live_broadcast_content {
+            pairs.push((YOUTUBE_LIVE_BROADCAST_KEY.into(), value.clone()));
         }
 
         pairs
@@ -570,6 +577,10 @@ impl From<VideoItem> for VideoEnrichment {
                 .as_ref()
                 .and_then(|snippet| snippet.channel_title.clone()),
             thumbnail_url,
+            live_broadcast_content: item
+                .snippet
+                .as_ref()
+                .and_then(|snippet| snippet.live_broadcast_content.clone()),
         }
     }
 }

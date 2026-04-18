@@ -2,10 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
     pub general: General,
@@ -19,7 +19,7 @@ pub struct Config {
     pub sources: Vec<Source>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct General {
     #[serde(default = "default_top_n")]
     pub default_top_n: u32,
@@ -44,13 +44,13 @@ fn default_poll_interval_mins() -> u32 {
     30
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Ranking {
     #[serde(default)]
     pub mode: RankingMode,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum RankingMode {
     #[default]
@@ -59,16 +59,51 @@ pub enum RankingMode {
     Claude,
 }
 
-#[derive(Debug, Default, Deserialize)]
+impl std::fmt::Display for RankingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RankingMode::Recency => write!(f, "recency"),
+            RankingMode::Popularity => write!(f, "popularity"),
+            RankingMode::Claude => write!(f, "claude"),
+        }
+    }
+}
+
+impl RankingMode {
+    pub const ALL: [RankingMode; 3] = [
+        RankingMode::Recency,
+        RankingMode::Popularity,
+        RankingMode::Claude,
+    ];
+
+    pub fn cycle_next(self) -> Self {
+        match self {
+            RankingMode::Recency => RankingMode::Popularity,
+            RankingMode::Popularity => RankingMode::Claude,
+            RankingMode::Claude => RankingMode::Recency,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Ai {
     #[serde(default)]
     pub interests: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub struct Youtube {}
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct Youtube {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub show_shorts: bool,
+    #[serde(default)]
+    pub show_live: bool,
+    #[serde(default)]
+    pub show_premieres: bool,
+}
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Source {
     pub name: String,
     pub url: String,
@@ -79,7 +114,7 @@ pub struct Source {
     pub ranking: Option<RankingMode>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum AdapterType {
     Rss,
@@ -124,6 +159,16 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+
+    #[error("serializing config")]
+    Serialize(#[from] toml::ser::Error),
+
+    #[error("writing {path}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 impl Config {
@@ -153,6 +198,35 @@ impl Config {
 
     pub fn load() -> Result<Self, ConfigError> {
         Self::load_from(Self::default_path()?)
+    }
+
+    pub fn save(&self) -> Result<(), ConfigError> {
+        self.save_to(Self::default_path()?)
+    }
+
+    pub fn save_to(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
+        let path = path.as_ref();
+        let raw = toml::to_string_pretty(self)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        }
+        fs::write(path, raw).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    pub fn youtube_api_key(&self) -> Option<String> {
+        self.youtube
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("YOUTUBE_API_KEY").ok())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
     }
 }
 
@@ -246,5 +320,24 @@ adapter = "rss"
 
         assert_eq!(config.sources.len(), 1);
         assert_eq!(config.sources[0].ranking, None);
+    }
+
+    #[test]
+    fn youtube_api_key_from_config() {
+        let raw = r#"
+[youtube]
+api_key = "AIzaTestKey123"
+"#;
+        let config = Config::parse(raw).expect("parses");
+        assert_eq!(
+            config.youtube.api_key.as_deref(),
+            Some("AIzaTestKey123")
+        );
+    }
+
+    #[test]
+    fn youtube_api_key_defaults_to_none() {
+        let config = Config::parse("").expect("parses");
+        assert_eq!(config.youtube.api_key, None);
     }
 }

@@ -24,9 +24,10 @@ Skip product launches and crypto content.
 """
 
 [youtube]
-# YouTube Data API key is read from the YOUTUBE_API_KEY environment variable,
-# never from this file. Only required if you want popularity sorting on
-# YouTube sources.
+# YouTube Data API key. Used for fetching videos when RSS feeds are unavailable,
+# and for popularity-based ranking enrichment. You can also set the
+# YOUTUBE_API_KEY environment variable instead (env var overrides this).
+# api_key = "AIza..."
 
 # Add as many sources as you like. `adapter` is "rss" or "youtube".
 # `ranking` overrides the global [ranking].mode for a single source.

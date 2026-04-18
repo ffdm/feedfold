@@ -32,6 +32,7 @@ pub struct NewSource {
 pub enum EntryState {
     New,
     Viewed,
+    Ignored,
     Starred,
 }
 
@@ -40,6 +41,7 @@ impl EntryState {
         match self {
             EntryState::New => "new",
             EntryState::Viewed => "viewed",
+            EntryState::Ignored => "ignored",
             EntryState::Starred => "starred",
         }
     }
@@ -48,6 +50,7 @@ impl EntryState {
         match s {
             "new" => Some(EntryState::New),
             "viewed" => Some(EntryState::Viewed),
+            "ignored" => Some(EntryState::Ignored),
             "starred" => Some(EntryState::Starred),
             _ => None,
         }
@@ -289,6 +292,22 @@ impl Storage {
         Ok(self.conn.last_insert_rowid())
     }
 
+    pub fn update_source_top_n(&self, source_id: i64, top_n: Option<u32>) -> Result<(), StorageError> {
+        self.conn.execute(
+            "UPDATE sources SET top_n_override = ?1 WHERE id = ?2",
+            params![top_n, source_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_source(&self, source_id: i64) -> Result<(), StorageError> {
+        self.conn.execute(
+            "DELETE FROM sources WHERE id = ?1",
+            params![source_id],
+        )?;
+        Ok(())
+    }
+
     pub fn list_sources(&self) -> Result<Vec<Source>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, url, adapter_type, top_n_override, created_at \
@@ -420,6 +439,33 @@ impl Storage {
         Ok(enrichments)
     }
 
+    pub fn get_enrichments_for_entries(
+        &self,
+        entry_ids: &[i64],
+    ) -> Result<HashMap<i64, HashMap<String, String>>, StorageError> {
+        if entry_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders: String = entry_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT entry_id, key, value FROM enrichments WHERE entry_id IN ({placeholders})"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn ToSql> = entry_ids.iter().map(|id| id as &dyn ToSql).collect();
+        let mut rows = stmt.query(params.as_slice())?;
+        let mut enrichments: HashMap<i64, HashMap<String, String>> = HashMap::new();
+        while let Some(row) = rows.next()? {
+            let entry_id: i64 = row.get(0)?;
+            let key: String = row.get(1)?;
+            let value: String = row.get(2)?;
+            enrichments
+                .entry(entry_id)
+                .or_default()
+                .insert(key, value);
+        }
+        Ok(enrichments)
+    }
+
     pub fn set_entry_state(&mut self, id: i64, state: EntryState) -> Result<(), StorageError> {
         self.conn.execute(
             "UPDATE entries SET state = ?1 WHERE id = ?2",
@@ -456,22 +502,47 @@ impl Storage {
             "SELECT id, source_id, external_id, title, summary, url, thumbnail_url, \
                     author, published_at, fetched_at, state, rating, score, \
                     displayed_in_top_n \
-             FROM entries WHERE displayed_in_top_n = 1 \
+             FROM entries WHERE displayed_in_top_n = 1 AND state IN (?1, ?2) \
              ORDER BY score DESC, published_at DESC",
         )?;
-        let rows = stmt.query_map([], row_to_entry)?;
+        let rows = stmt.query_map(
+            [EntryState::New, EntryState::Starred],
+            row_to_entry,
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn list_viewed_entries(&self) -> Result<Vec<Entry>, StorageError> {
         let mut stmt = self.conn.prepare(
+            "SELECT entries.id, entries.source_id, entries.external_id, entries.title, \
+                    entries.summary, entries.url, entries.thumbnail_url, entries.author, \
+                    entries.published_at, entries.fetched_at, entries.state, entries.rating, \
+                    entries.score, entries.displayed_in_top_n \
+             FROM entries \
+             LEFT JOIN ( \
+                 SELECT entry_id, MAX(viewed_at) AS last_viewed_at \
+                 FROM daily_views GROUP BY entry_id \
+             ) v ON v.entry_id = entries.id \
+             WHERE entries.state IN (?1, ?2) \
+             ORDER BY COALESCE(v.last_viewed_at, entries.fetched_at) DESC, \
+                      entries.fetched_at DESC",
+        )?;
+        let rows = stmt.query_map(
+            [EntryState::Viewed, EntryState::Starred],
+            row_to_entry,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn list_ignored_entries(&self) -> Result<Vec<Entry>, StorageError> {
+        let mut stmt = self.conn.prepare(
             "SELECT id, source_id, external_id, title, summary, url, thumbnail_url, \
                     author, published_at, fetched_at, state, rating, score, \
                     displayed_in_top_n \
-             FROM entries WHERE state IN (?1, ?2) \
+             FROM entries WHERE state = ?1 \
              ORDER BY published_at DESC, fetched_at DESC",
         )?;
-        let rows = stmt.query_map([EntryState::Viewed, EntryState::Starred], row_to_entry)?;
+        let rows = stmt.query_map([EntryState::Ignored], row_to_entry)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -543,8 +614,8 @@ impl Storage {
     ) -> Result<(), StorageError> {
         let tx = self.conn.transaction()?;
         tx.execute(
-            "UPDATE entries SET state = ?1 WHERE id = ?2 AND state = ?3",
-            params![EntryState::Viewed, id, EntryState::New],
+            "UPDATE entries SET state = ?1 WHERE id = ?2 AND state IN (?3, ?4)",
+            params![EntryState::Viewed, id, EntryState::New, EntryState::Ignored],
         )?;
         tx.execute(
             "INSERT INTO daily_views (date, entry_id, viewed_at) VALUES (?1, ?2, ?3) \
@@ -1111,6 +1182,53 @@ mod tests {
         let viewed_entries = storage.list_viewed_entries().unwrap();
         assert_eq!(viewed_entries.len(), 1);
         assert_eq!(viewed_entries[0].external_id, "viewed");
+    }
+
+    #[test]
+    fn list_viewed_entries_orders_by_most_recent_view() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage
+            .insert_source(&new_source("Blog", "https://a.example/feed.xml"))
+            .unwrap();
+
+        let mut older_published = new_entry(source_id, "older", "Older published");
+        older_published.published_at = Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap());
+        let mut newer_published = new_entry(source_id, "newer", "Newer published");
+        newer_published.published_at = Some(Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap());
+
+        storage
+            .upsert_entries(&[older_published, newer_published])
+            .unwrap();
+        let entries = storage.list_entries_for_source(source_id).unwrap();
+        let older = entries
+            .iter()
+            .find(|entry| entry.external_id == "older")
+            .unwrap();
+        let newer = entries
+            .iter()
+            .find(|entry| entry.external_id == "newer")
+            .unwrap();
+
+        let viewed_on = NaiveDate::from_ymd_opt(2026, 4, 17).unwrap();
+        storage
+            .record_entry_view_at(
+                newer.id,
+                Utc.with_ymd_and_hms(2026, 4, 17, 10, 0, 0).unwrap(),
+                viewed_on,
+            )
+            .unwrap();
+        storage
+            .record_entry_view_at(
+                older.id,
+                Utc.with_ymd_and_hms(2026, 4, 17, 12, 0, 0).unwrap(),
+                viewed_on,
+            )
+            .unwrap();
+
+        let viewed_entries = storage.list_viewed_entries().unwrap();
+        assert_eq!(viewed_entries.len(), 2);
+        assert_eq!(viewed_entries[0].external_id, "older");
+        assert_eq!(viewed_entries[1].external_id, "newer");
     }
 
     #[test]
