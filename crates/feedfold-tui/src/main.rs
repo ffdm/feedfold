@@ -207,6 +207,15 @@ async fn run_tui() -> Result<()> {
     res
 }
 
+#[derive(Debug, Clone)]
+enum UndoAction {
+    SetState { id: i64, prev_state: EntryState },
+    SetRating { id: i64, prev_rating: Option<u8> },
+    RecordView { id: i64, prev_state: EntryState },
+}
+
+const UNDO_STACK_MAX: usize = 50;
+
 struct App {
     active_view: ActiveView,
     entries: Vec<Entry>,
@@ -227,6 +236,7 @@ struct App {
     thumbnail_cache: HashMap<String, ThumbnailStatus>,
     thumbnail_tx: Sender<ThumbnailDownload>,
     thumbnail_rx: Receiver<ThumbnailDownload>,
+    undo_stack: Vec<UndoAction>,
 }
 
 impl App {
@@ -266,7 +276,15 @@ impl App {
             thumbnail_cache: HashMap::new(),
             thumbnail_tx,
             thumbnail_rx,
+            undo_stack: Vec::new(),
         }
+    }
+
+    fn push_undo(&mut self, action: UndoAction) {
+        if self.undo_stack.len() >= UNDO_STACK_MAX {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(action);
     }
 
     fn current_list_len(&self) -> usize {
@@ -968,25 +986,32 @@ fn run_app(
                     KeyCode::Char(c @ '1'..='5') => {
                         let rating = c.to_digit(10).expect("digit key") as u8;
                         if let Some(entry) = app.selected_entry_mut() {
-                            storage.set_entry_rating(entry.id, rating)?;
-                            entry.rating = Some(rating);
-                            needs_redraw = true;
+                            let id = entry.id;
+                            let prev_rating = entry.rating;
+                            if prev_rating != Some(rating) {
+                                storage.set_entry_rating(id, rating)?;
+                                entry.rating = Some(rating);
+                                app.push_undo(UndoAction::SetRating { id, prev_rating });
+                                needs_redraw = true;
+                            }
                         }
                     }
                     KeyCode::Char('s') => {
-                        if toggle_star_for_selected(app, storage)? {
+                        if let Some((id, prev_state)) = toggle_star_for_selected(app, storage)? {
+                            app.push_undo(UndoAction::SetState { id, prev_state });
                             needs_redraw = true;
                         }
                     }
                     KeyCode::Char('i') => {
                         if let Some(entry) = app.selected_entry() {
                             let id = entry.id;
-                            let was_new = entry.state == EntryState::New;
-                            if was_new {
+                            let prev_state = entry.state;
+                            if prev_state == EntryState::New {
                                 storage.set_entry_state(id, EntryState::Ignored)?;
                                 if let Some(entry) = app.selected_entry_mut() {
                                     entry.state = EntryState::Ignored;
                                 }
+                                app.push_undo(UndoAction::SetState { id, prev_state });
                                 if !app.is_search_active()
                                     && matches!(
                                         app.active_view,
@@ -1000,7 +1025,13 @@ fn run_app(
                         }
                     }
                     KeyCode::Char('v') => {
-                        if mark_selected_viewed(app, storage)? {
+                        if let Some((id, prev_state)) = mark_selected_viewed(app, storage)? {
+                            app.push_undo(UndoAction::RecordView { id, prev_state });
+                            needs_redraw = true;
+                        }
+                    }
+                    KeyCode::Char('u') => {
+                        if apply_undo(app, storage)? {
                             needs_redraw = true;
                         }
                     }
@@ -1070,19 +1101,16 @@ fn load_entries_for_view(
     }
 }
 
-fn mark_selected_viewed(app: &mut App, storage: &mut Storage) -> Result<bool> {
-    let Some((entry_id, was_transitionable)) = app.selected_entry().map(|entry| {
-        (
-            entry.id,
-            matches!(entry.state, EntryState::New | EntryState::Ignored),
-        )
+fn mark_selected_viewed(
+    app: &mut App,
+    storage: &mut Storage,
+) -> Result<Option<(i64, EntryState)>> {
+    let Some((entry_id, prev_state)) = app.selected_entry().and_then(|entry| {
+        matches!(entry.state, EntryState::New | EntryState::Ignored)
+            .then_some((entry.id, entry.state))
     }) else {
-        return Ok(false);
+        return Ok(None);
     };
-
-    if !was_transitionable {
-        return Ok(false);
-    }
 
     storage.record_entry_view(entry_id)?;
     app.viewed_today_count = storage.count_entries_viewed_today()?;
@@ -1100,19 +1128,22 @@ fn mark_selected_viewed(app: &mut App, storage: &mut Storage) -> Result<bool> {
         refresh_view(app, storage)?;
     }
 
-    Ok(true)
+    Ok(Some((entry_id, prev_state)))
 }
 
-fn toggle_star_for_selected(app: &mut App, storage: &mut Storage) -> Result<bool> {
-    let Some((entry_id, next_state)) = app.selected_entry().map(|entry| {
+fn toggle_star_for_selected(
+    app: &mut App,
+    storage: &mut Storage,
+) -> Result<Option<(i64, EntryState)>> {
+    let Some((entry_id, prev_state, next_state)) = app.selected_entry().map(|entry| {
         let next_state = if entry.state == EntryState::Starred {
             EntryState::Viewed
         } else {
             EntryState::Starred
         };
-        (entry.id, next_state)
+        (entry.id, entry.state, next_state)
     }) else {
-        return Ok(false);
+        return Ok(None);
     };
 
     storage.set_entry_state(entry_id, next_state)?;
@@ -1123,6 +1154,30 @@ fn toggle_star_for_selected(app: &mut App, storage: &mut Storage) -> Result<bool
         entry.state = next_state;
     }
 
+    Ok(Some((entry_id, prev_state)))
+}
+
+fn apply_undo(app: &mut App, storage: &mut Storage) -> Result<bool> {
+    let Some(action) = app.undo_stack.pop() else {
+        return Ok(false);
+    };
+
+    match action {
+        UndoAction::SetState { id, prev_state } => {
+            storage.set_entry_state(id, prev_state)?;
+        }
+        UndoAction::SetRating { id, prev_rating } => match prev_rating {
+            Some(r) => storage.set_entry_rating(id, r)?,
+            None => storage.clear_entry_rating(id)?,
+        },
+        UndoAction::RecordView { id, prev_state } => {
+            storage.set_entry_state(id, prev_state)?;
+            storage.delete_daily_view_today(id)?;
+            app.viewed_today_count = storage.count_entries_viewed_today()?;
+        }
+    }
+
+    refresh_view(app, storage)?;
     Ok(true)
 }
 
@@ -1179,8 +1234,9 @@ fn filter_youtube_content(
         if !config.youtube.show_shorts {
             let title_lower = entry.title.to_lowercase();
             let summary_lower = entry.summary.as_deref().unwrap_or("").to_lowercase();
+            let url_lower = entry.url.to_lowercase();
             
-            if title_lower.contains("#shorts") || summary_lower.contains("#shorts") {
+            if title_lower.contains("#shorts") || summary_lower.contains("#shorts") || url_lower.contains("shorts") {
                 return false;
             }
 
@@ -1421,6 +1477,8 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         Span::styled("tar ", dim),
         Span::styled("1-5", key),
         Span::styled(" rate ", dim),
+        Span::styled("u", key),
+        Span::styled("ndo ", dim),
         Span::styled("r", key),
         Span::styled("eload ", dim),
         sep,
@@ -2556,7 +2614,7 @@ mod tests {
         refresh_view(&mut app, &storage).unwrap();
 
         assert_eq!(app.entries.len(), 1);
-        assert!(toggle_star_for_selected(&mut app, &mut storage).unwrap());
+        assert!(toggle_star_for_selected(&mut app, &mut storage).unwrap().is_some());
         assert!(app.entries.is_empty());
 
         let updated = storage
