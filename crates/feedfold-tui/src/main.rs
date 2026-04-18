@@ -1412,6 +1412,8 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         Span::styled("gnore ", dim),
         Span::styled("s", key),
         Span::styled("tar ", dim),
+        Span::styled("1-5", key),
+        Span::styled(" rate ", dim),
         Span::styled("r", key),
         Span::styled("eload ", dim),
         sep,
