@@ -198,6 +198,7 @@ async fn run_tui() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(entries, sources, config, detect_thumbnail_mode(), thumbnail_dir);
+    let _ = trigger_refresh(&mut app, &mut storage);
     let res = run_app(&mut terminal, &mut app, &mut storage);
 
     disable_raw_mode()?;
@@ -207,11 +208,40 @@ async fn run_tui() -> Result<()> {
     res
 }
 
+fn trigger_refresh(app: &mut App, storage: &mut Storage) -> Result<()> {
+    let sources = storage.list_sources()?;
+
+    for source in &sources {
+        let top_n = source.top_n_override.unwrap_or(app.config.general.default_top_n) as usize;
+        let mode = app.config.sources.iter().find(|s| s.url == source.url).and_then(|s| s.ranking).unwrap_or(app.config.ranking.mode);
+
+        if let Ok(entries) = storage.list_entries_for_source(source.id) {
+            if let Ok(enrichments) = storage.list_enrichments_for_source(source.id) {
+                let ctx = feedfold_core::ranker::RankContext {
+                    top_n,
+                    enrichments,
+                };
+                let scores = match mode {
+                    RankingMode::Recency => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::RecencyRanker, &entries, &ctx),
+                    RankingMode::Popularity => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::PopularityRanker, &entries, &ctx),
+                    RankingMode::Claude => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::RecencyRanker, &entries, &ctx),
+                };
+                let _ = storage.apply_ranking(source.id, &scores, top_n);
+            }
+        }
+    }
+
+    app.source_names = sources.into_iter().map(|s| (s.id, s.name)).collect();
+    refresh_view(app, storage)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 enum UndoAction {
     SetState { id: i64, prev_state: EntryState },
     SetRating { id: i64, prev_rating: Option<u8> },
-    RecordView { id: i64, prev_state: EntryState },
+    MarkedView { id: i64, prev_state: EntryState },
+    UnmarkedView { id: i64 },
 }
 
 const UNDO_STACK_MAX: usize = 50;
@@ -949,33 +979,9 @@ fn run_app(
                         needs_redraw = true;
                     }
                     KeyCode::Char('r') => {
-                        let sources = storage.list_sources()?;
-
-                        for source in &sources {
-                            let top_n = source.top_n_override.unwrap_or(app.config.general.default_top_n) as usize;
-                            let mode = app.config.sources.iter().find(|s| s.url == source.url).and_then(|s| s.ranking).unwrap_or(app.config.ranking.mode);
-                            
-                            if let Ok(entries) = storage.list_entries_for_source(source.id) {
-                                if let Ok(enrichments) = storage.list_enrichments_for_source(source.id) {
-                                    let ctx = feedfold_core::ranker::RankContext {
-                                        top_n,
-                                        enrichments,
-                                    };
-                                    let scores = match mode {
-                                        RankingMode::Recency => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::RecencyRanker, &entries, &ctx),
-                                        RankingMode::Popularity => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::PopularityRanker, &entries, &ctx),
-                                        RankingMode::Claude => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::RecencyRanker, &entries, &ctx),
-                                    };
-                                    let _ = storage.apply_ranking(source.id, &scores, top_n);
-                                }
-                            }
-                        }
-
-                        app.source_names = sources.into_iter().map(|s| (s.id, s.name)).collect();
-                        refresh_view(app, storage)?;
+                        trigger_refresh(app, storage)?;
                         needs_redraw = true;
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
+                    }                    KeyCode::Char('j') | KeyCode::Down => {
                         app.next();
                         needs_redraw = true;
                     }
@@ -1003,30 +1009,14 @@ fn run_app(
                         }
                     }
                     KeyCode::Char('i') => {
-                        if let Some(entry) = app.selected_entry() {
-                            let id = entry.id;
-                            let prev_state = entry.state;
-                            if prev_state == EntryState::New {
-                                storage.set_entry_state(id, EntryState::Ignored)?;
-                                if let Some(entry) = app.selected_entry_mut() {
-                                    entry.state = EntryState::Ignored;
-                                }
-                                app.push_undo(UndoAction::SetState { id, prev_state });
-                                if !app.is_search_active()
-                                    && matches!(
-                                        app.active_view,
-                                        ActiveView::Home | ActiveView::Channels | ActiveView::Overflow
-                                    )
-                                {
-                                    refresh_view(app, storage)?;
-                                }
-                                needs_redraw = true;
-                            }
+                        if let Some((id, prev_state)) = toggle_ignore_for_selected(app, storage)? {
+                            app.push_undo(UndoAction::SetState { id, prev_state });
+                            needs_redraw = true;
                         }
                     }
                     KeyCode::Char('v') => {
-                        if let Some((id, prev_state)) = mark_selected_viewed(app, storage)? {
-                            app.push_undo(UndoAction::RecordView { id, prev_state });
+                        if let Some(action) = toggle_viewed_for_selected(app, storage)? {
+                            app.push_undo(action);
                             needs_redraw = true;
                         }
                     }
@@ -1101,22 +1091,24 @@ fn load_entries_for_view(
     }
 }
 
-fn mark_selected_viewed(
+fn toggle_ignore_for_selected(
     app: &mut App,
     storage: &mut Storage,
 ) -> Result<Option<(i64, EntryState)>> {
-    let Some((entry_id, prev_state)) = app.selected_entry().and_then(|entry| {
-        matches!(entry.state, EntryState::New | EntryState::Ignored)
-            .then_some((entry.id, entry.state))
+    let Some((entry_id, prev_state, next_state)) = app.selected_entry().and_then(|entry| {
+        let next = match entry.state {
+            EntryState::New => Some(EntryState::Ignored),
+            EntryState::Ignored => Some(EntryState::New),
+            EntryState::Viewed | EntryState::Starred => None,
+        }?;
+        Some((entry.id, entry.state, next))
     }) else {
         return Ok(None);
     };
 
-    storage.record_entry_view(entry_id)?;
-    app.viewed_today_count = storage.count_entries_viewed_today()?;
-
+    storage.set_entry_state(entry_id, next_state)?;
     if let Some(entry) = app.selected_entry_mut() {
-        entry.state = EntryState::Viewed;
+        entry.state = next_state;
     }
 
     if !app.is_search_active()
@@ -1129,6 +1121,57 @@ fn mark_selected_viewed(
     }
 
     Ok(Some((entry_id, prev_state)))
+}
+
+fn toggle_viewed_for_selected(
+    app: &mut App,
+    storage: &mut Storage,
+) -> Result<Option<UndoAction>> {
+    let Some((entry_id, prev_state)) = app
+        .selected_entry()
+        .map(|entry| (entry.id, entry.state))
+    else {
+        return Ok(None);
+    };
+
+    let action = match prev_state {
+        EntryState::New | EntryState::Ignored => {
+            storage.record_entry_view(entry_id)?;
+            app.viewed_today_count = storage.count_entries_viewed_today()?;
+            if let Some(entry) = app.selected_entry_mut() {
+                entry.state = EntryState::Viewed;
+            }
+            UndoAction::MarkedView {
+                id: entry_id,
+                prev_state,
+            }
+        }
+        EntryState::Viewed => {
+            storage.set_entry_state(entry_id, EntryState::New)?;
+            storage.delete_daily_view_today(entry_id)?;
+            app.viewed_today_count = storage.count_entries_viewed_today()?;
+            if let Some(entry) = app.selected_entry_mut() {
+                entry.state = EntryState::New;
+            }
+            UndoAction::UnmarkedView { id: entry_id }
+        }
+        EntryState::Starred => return Ok(None),
+    };
+
+    if !app.is_search_active()
+        && matches!(
+            app.active_view,
+            ActiveView::Home
+                | ActiveView::Channels
+                | ActiveView::Overflow
+                | ActiveView::Ignored
+                | ActiveView::Viewed
+        )
+    {
+        refresh_view(app, storage)?;
+    }
+
+    Ok(Some(action))
 }
 
 fn toggle_star_for_selected(
@@ -1170,9 +1213,13 @@ fn apply_undo(app: &mut App, storage: &mut Storage) -> Result<bool> {
             Some(r) => storage.set_entry_rating(id, r)?,
             None => storage.clear_entry_rating(id)?,
         },
-        UndoAction::RecordView { id, prev_state } => {
+        UndoAction::MarkedView { id, prev_state } => {
             storage.set_entry_state(id, prev_state)?;
             storage.delete_daily_view_today(id)?;
+            app.viewed_today_count = storage.count_entries_viewed_today()?;
+        }
+        UndoAction::UnmarkedView { id } => {
+            storage.record_entry_view(id)?;
             app.viewed_today_count = storage.count_entries_viewed_today()?;
         }
     }
