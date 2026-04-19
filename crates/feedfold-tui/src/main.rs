@@ -4,6 +4,7 @@ use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::OnceLock;
 use std::thread;
@@ -90,6 +91,21 @@ enum Command {
 enum DaemonCommand {
     /// Install a launchd agent plist for feedfoldd.
     Install,
+    /// Show whether the launchd service is installed or running.
+    Status,
+    /// Load and start the launchd service.
+    Start,
+    /// Stop and unload the launchd service.
+    Stop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LaunchctlServiceStatus {
+    Unloaded,
+    Loaded {
+        state: Option<String>,
+        pid: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,15 +243,16 @@ async fn main() -> Result<()> {
         Some(Command::Remove { id_or_url, yes }) => remove_source(&id_or_url, yes),
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => install_daemon(),
+            DaemonCommand::Status => daemon_status(),
+            DaemonCommand::Start => start_daemon(),
+            DaemonCommand::Stop => stop_daemon(),
         },
         None => run_tui().await,
     }
 }
 
 fn install_daemon() -> Result<()> {
-    if !cfg!(target_os = "macos") {
-        anyhow::bail!("`feedfold daemon install` is only supported on macOS");
-    }
+    require_macos_daemon_command("install")?;
 
     let home_dir = home_dir()?;
     let plist_path = launch_agent_path(&home_dir);
@@ -271,6 +288,131 @@ fn install_daemon() -> Result<()> {
     Ok(())
 }
 
+fn daemon_status() -> Result<()> {
+    require_macos_daemon_command("status")?;
+
+    let plist_path = launch_agent_path(&home_dir()?);
+    if !plist_path.exists() {
+        println!("Daemon not installed. Run `feedfold daemon install` first.");
+        return Ok(());
+    }
+
+    let (_, service_target) = launchctl_targets()?;
+    match launchctl_service_status(&service_target)? {
+        LaunchctlServiceStatus::Unloaded => {
+            println!(
+                "Daemon stopped. Launchd agent is installed at {}.",
+                plist_path.display()
+            );
+        }
+        LaunchctlServiceStatus::Loaded {
+            state,
+            pid: Some(pid),
+        } => {
+            println!("Daemon running with pid {pid}.");
+            if let Some(state) = state.filter(|value| value != "running") {
+                println!("Launchd state: {state}");
+            }
+        }
+        LaunchctlServiceStatus::Loaded { state, pid: None } => {
+            if let Some(state) = state {
+                println!("Daemon loaded with launchd state `{state}`.");
+            } else {
+                println!("Daemon loaded.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn start_daemon() -> Result<()> {
+    require_macos_daemon_command("start")?;
+
+    let plist_path = launch_agent_path(&home_dir()?);
+    if !plist_path.exists() {
+        anyhow::bail!(
+            "launchd agent is not installed at {}. Run `feedfold daemon install` first",
+            plist_path.display()
+        );
+    }
+
+    let (domain_target, service_target) = launchctl_targets()?;
+    match launchctl_service_status(&service_target)? {
+        LaunchctlServiceStatus::Loaded {
+            pid: Some(pid),
+            state,
+        } if state.as_deref() == Some("running") => {
+            println!("Daemon already running with pid {pid}.");
+            return Ok(());
+        }
+        LaunchctlServiceStatus::Loaded { .. } => {
+            let output = ProcessCommand::new("launchctl")
+                .arg("kickstart")
+                .arg("-p")
+                .arg(&service_target)
+                .output()
+                .context("running `launchctl kickstart`")?;
+            ensure_launchctl_success("kickstart", &output)?;
+
+            if let Some(pid) = parse_launchctl_pid(&String::from_utf8_lossy(&output.stdout)) {
+                println!("Started daemon with pid {pid}.");
+            } else {
+                println!("Started daemon.");
+            }
+        }
+        LaunchctlServiceStatus::Unloaded => {
+            let output = ProcessCommand::new("launchctl")
+                .arg("bootstrap")
+                .arg(&domain_target)
+                .arg(&plist_path)
+                .output()
+                .context("running `launchctl bootstrap`")?;
+            ensure_launchctl_success("bootstrap", &output)?;
+
+            print_started_daemon_status(&launchctl_service_status(&service_target)?);
+        }
+    }
+
+    Ok(())
+}
+
+fn stop_daemon() -> Result<()> {
+    require_macos_daemon_command("stop")?;
+
+    let plist_path = launch_agent_path(&home_dir()?);
+    if !plist_path.exists() {
+        println!("Daemon not installed.");
+        return Ok(());
+    }
+
+    let (_, service_target) = launchctl_targets()?;
+    match launchctl_service_status(&service_target)? {
+        LaunchctlServiceStatus::Unloaded => {
+            println!("Daemon already stopped.");
+        }
+        LaunchctlServiceStatus::Loaded { .. } => {
+            let output = ProcessCommand::new("launchctl")
+                .arg("bootout")
+                .arg(&service_target)
+                .output()
+                .context("running `launchctl bootout`")?;
+            ensure_launchctl_success("bootout", &output)?;
+            println!("Stopped daemon.");
+        }
+    }
+
+    Ok(())
+}
+
+fn require_macos_daemon_command(command: &str) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        anyhow::bail!("`feedfold daemon {command}` is only supported on macOS");
+    }
+
+    Ok(())
+}
+
 fn home_dir() -> Result<PathBuf> {
     BaseDirs::new()
         .map(|dirs| dirs.home_dir().to_path_buf())
@@ -289,6 +431,136 @@ fn daemon_binary_path(current_exe: &Path) -> Result<PathBuf> {
         .parent()
         .context("current executable has no parent directory")?;
     Ok(exe_dir.join(format!("feedfoldd{}", std::env::consts::EXE_SUFFIX)))
+}
+
+fn launchctl_targets() -> Result<(String, String)> {
+    let domain_target = launchctl_domain_target()?;
+    let service_target = launchctl_service_target(&domain_target);
+    Ok((domain_target, service_target))
+}
+
+fn launchctl_domain_target() -> Result<String> {
+    let output = ProcessCommand::new("id")
+        .arg("-u")
+        .output()
+        .context("running `id -u`")?;
+    if !output.status.success() {
+        anyhow::bail!("`id -u` failed: {}", command_output_text(&output));
+    }
+
+    let uid = String::from_utf8(output.stdout)
+        .context("`id -u` returned non-UTF-8 output")?
+        .trim()
+        .to_string();
+    if uid.is_empty() {
+        anyhow::bail!("`id -u` returned an empty uid");
+    }
+
+    Ok(format!("gui/{uid}"))
+}
+
+fn launchctl_service_target(domain_target: &str) -> String {
+    format!("{domain_target}/{LAUNCHD_LABEL}")
+}
+
+fn launchctl_service_status(service_target: &str) -> Result<LaunchctlServiceStatus> {
+    let output = ProcessCommand::new("launchctl")
+        .arg("print")
+        .arg(service_target)
+        .output()
+        .with_context(|| format!("running `launchctl print {service_target}`"))?;
+
+    parse_launchctl_service_status(output.status.code(), &command_output_text(&output))
+}
+
+fn parse_launchctl_service_status(
+    exit_code: Option<i32>,
+    output: &str,
+) -> Result<LaunchctlServiceStatus> {
+    if exit_code == Some(0) {
+        let state = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("state = ").map(ToOwned::to_owned));
+        let pid = parse_launchctl_pid(output);
+        return Ok(LaunchctlServiceStatus::Loaded { state, pid });
+    }
+
+    if output.contains("Could not find service") {
+        return Ok(LaunchctlServiceStatus::Unloaded);
+    }
+
+    anyhow::bail!(
+        "`launchctl print` failed{}: {}",
+        exit_code
+            .map(|value| format!(" with exit code {value}"))
+            .unwrap_or_default(),
+        output.trim()
+    );
+}
+
+fn parse_launchctl_pid(output: &str) -> Option<u32> {
+    output.lines().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("pid = ")
+            .unwrap_or(trimmed)
+            .parse()
+            .ok()
+    })
+}
+
+fn ensure_launchctl_success(command: &str, output: &std::process::Output) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "`launchctl {command}` failed: {}",
+        command_output_text(output)
+    );
+}
+
+fn command_output_text(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (false, false) => format!("{stdout}\n{stderr}"),
+        (false, true) => stdout,
+        (true, false) => stderr,
+        (true, true) => "(no output)".to_string(),
+    }
+}
+
+fn print_started_daemon_status(status: &LaunchctlServiceStatus) {
+    match status {
+        LaunchctlServiceStatus::Loaded {
+            pid: Some(pid),
+            state,
+        } if state.as_deref() == Some("running") => {
+            println!("Started daemon with pid {pid}.");
+        }
+        LaunchctlServiceStatus::Loaded {
+            state,
+            pid: Some(pid),
+        } => {
+            if let Some(state) = state {
+                println!("Started daemon with pid {pid} (launchd state `{state}`).");
+            } else {
+                println!("Started daemon with pid {pid}.");
+            }
+        }
+        LaunchctlServiceStatus::Loaded { state, pid: None } => {
+            if let Some(state) = state {
+                println!("Started daemon (launchd state `{state}`).");
+            } else {
+                println!("Started daemon.");
+            }
+        }
+        LaunchctlServiceStatus::Unloaded => {
+            println!("Daemon loaded, but launchctl did not report a running service.");
+        }
+    }
 }
 
 fn render_launchd_plist(daemon_path: &Path, working_dir: &Path) -> String {
@@ -3716,6 +3988,13 @@ mod tests {
     }
 
     #[test]
+    fn launchctl_service_target_uses_label_suffix() {
+        let target = launchctl_service_target("gui/501");
+
+        assert_eq!(target, "gui/501/com.feedfold.feedfoldd");
+    }
+
+    #[test]
     fn render_launchd_plist_embeds_escaped_paths() {
         let daemon = Path::new("/tmp/feed & fold/bin/feedfoldd");
         let workdir = Path::new("/tmp/feed <fold>/bin");
@@ -3727,5 +4006,46 @@ mod tests {
         assert!(plist.contains("/tmp/feed &lt;fold&gt;/bin"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
+    }
+
+    #[test]
+    fn parse_launchctl_service_status_reads_state_and_pid() {
+        let output = r#"gui/501/com.feedfold.feedfoldd = {
+	state = running
+	pid = 4242
+}"#;
+
+        let status = parse_launchctl_service_status(Some(0), output).unwrap();
+
+        assert_eq!(
+            status,
+            LaunchctlServiceStatus::Loaded {
+                state: Some("running".to_string()),
+                pid: Some(4242),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_launchctl_service_status_marks_missing_service_as_unloaded() {
+        let output = "Bad request.\nCould not find service \"com.feedfold.feedfoldd\" in domain for user gui: 501";
+
+        let status = parse_launchctl_service_status(Some(113), output).unwrap();
+
+        assert_eq!(status, LaunchctlServiceStatus::Unloaded);
+    }
+
+    #[test]
+    fn parse_launchctl_service_status_rejects_other_launchctl_failures() {
+        let error = parse_launchctl_service_status(Some(5), "permission denied").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("`launchctl print` failed with exit code 5: permission denied"));
+    }
+
+    #[test]
+    fn parse_launchctl_pid_accepts_plain_pid_output() {
+        assert_eq!(parse_launchctl_pid("4242\n"), Some(4242));
     }
 }
