@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 feedfold-core     = { workspace = true }
 feedfold-adapters = { workspace = true }
+feedfold-daemon   = { workspace = true }
 anyhow            = { workspace = true }
 tokio             = { workspace = true }
 clap              = { workspace = true }

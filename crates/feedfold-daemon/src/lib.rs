@@ -17,7 +17,7 @@ use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::prelude::*;
 
 const CLAUDE_RATING_HISTORY_LIMIT: usize = 20;
-const DAEMON_PID_FILE: &str = "feedfoldd.pid";
+pub const DAEMON_PID_FILE: &str = "feedfoldd.pid";
 const DAEMON_LOG_FILE: &str = "feedfoldd.log";
 const MAX_LOG_BYTES: u64 = 1_048_576;
 
@@ -147,8 +147,7 @@ impl Drop for PidFileGuard {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+pub async fn run(process_name: &str) -> Result<()> {
     let state_dir = Storage::data_dir().context("resolving daemon state directory")?;
     let log_path = state_dir.join(DAEMON_LOG_FILE);
     init_logging(&log_path).with_context(|| format!("opening log file {}", log_path.display()))?;
@@ -177,7 +176,7 @@ async fn main() -> Result<()> {
     let interval = Duration::from_secs(u64::from(poll_mins) * 60);
 
     info!(
-        "feedfoldd {} starting (poll every {poll_mins}m)",
+        "{process_name} {} starting (poll every {poll_mins}m)",
         feedfold_core::VERSION
     );
     info!("Log file: {}", log_path.display());

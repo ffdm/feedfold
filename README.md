@@ -21,8 +21,7 @@ Needs a recent stable Rust toolchain.
 cargo build --release
 ```
 
-Two binaries drop into `target/release/`: `feedfoldd` (background fetcher)
-and `feedfold` (the reader).
+One binary drops into `target/release/`: `feedfold`.
 
 ## Set up
 
@@ -48,12 +47,18 @@ feedfold add "https://www.youtube.com/feeds/videos.xml?channel_id=UCsBjURrPoezyk
 feedfold list
 ```
 
-Start the daemon in a spare terminal, then open the reader:
+Open the reader:
 
 ```sh
-feedfoldd   # polls on the schedule in config.toml
-feedfold    # the TUI
+feedfold
 ```
+
+On macOS, the first `feedfold` launch installs and starts a persistent
+`launchd` agent automatically, so you do not need a separate daemon command
+or terminal. You can still inspect or control it with `feedfold daemon
+status|start|stop`.
+
+On Linux, persistent service management is not wired up yet.
 
 ## Keys
 
@@ -89,8 +94,8 @@ feedfold    # the TUI
 | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | House rules |
 | [config.example.toml](config.example.toml) | Annotated config |
 | `crates/feedfold-core` | Storage, adapters, ranking |
-| `crates/feedfold-daemon` | The fetcher |
-| `crates/feedfold-tui` | The reader |
+| `crates/feedfold-daemon` | Background polling runtime used by `feedfold` |
+| `crates/feedfold-tui` | The reader and CLI |
 
 ## License
 

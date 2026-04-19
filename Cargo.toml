@@ -18,6 +18,7 @@ rust-version = "1.75"
 [workspace.dependencies]
 feedfold-core     = { path = "crates/feedfold-core" }
 feedfold-adapters = { path = "crates/feedfold-adapters" }
+feedfold-daemon   = { path = "crates/feedfold-daemon" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

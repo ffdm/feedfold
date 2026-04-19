@@ -28,15 +28,16 @@ feedfold/
 └── crates/
     ├── feedfold-core/      # lib: data model, storage, config, ranker trait
     ├── feedfold-adapters/  # lib: concrete adapters (RSS, YouTube, Claude)
-    ├── feedfold-daemon/    # bin: background fetcher (feedfoldd)
+    ├── feedfold-daemon/    # lib: background polling runtime
     └── feedfold-tui/       # bin: ratatui reader + CLI (feedfold)
 ```
 
-Why the split: the TUI and daemon both depend on `core` and `adapters` but
-not each other. You can run the daemon headless on a server, or replace the
-TUI with a web interface, without touching the fetching or storage logic.
-`core` never depends on any binary or on `adapters`, so its public API stays
-forced into something reusable.
+Why the split: the daemon runtime and TUI both depend on `core` and
+`adapters`, and the `feedfold` binary embeds the daemon runtime for the
+single-binary install path. You can still replace the TUI with another
+frontend without touching the fetching or storage logic. `core` never depends
+on any binary or on `adapters`, so its public API stays forced into something
+reusable.
 
 `feedfold-adapters` holds all IO-bound implementations: RSS fetching, YouTube
 Data API enrichment, and the Claude ranking client. The `core` crate stays

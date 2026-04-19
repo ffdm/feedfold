@@ -886,6 +886,7 @@ dependencies = [
  "directories",
  "feedfold-adapters",
  "feedfold-core",
+ "feedfold-daemon",
  "open",
  "ratatui",
  "reqwest",

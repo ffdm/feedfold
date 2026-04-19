@@ -39,12 +39,14 @@ use feedfold_core::storage::{
     ChannelStats, Entry, EntryState, NewEntry, NewSource, Source as DbSource, Storage,
 };
 use feedfold_core::VERSION;
+use feedfold_daemon::DAEMON_PID_FILE;
 
 mod opml;
 
 const THUMBNAIL_HEIGHT: u16 = 12;
 const YOUTUBE_SHORTS_2024_EXPANSION_AT: &str = "2024-10-15T00:00:00Z";
 const LAUNCHD_LABEL: &str = "com.feedfold.feedfoldd";
+const INTERNAL_DAEMON_SUBCOMMAND: &str = "__daemon";
 
 #[derive(Debug, Parser)]
 #[command(name = "feedfold", version = VERSION, about = "Terminal RSS reader")]
@@ -85,6 +87,8 @@ enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    #[command(hide = true, name = "__daemon")]
+    InternalDaemon,
 }
 
 #[derive(Debug, Subcommand)]
@@ -226,6 +230,31 @@ struct DaemonStatus {
     started_at: DateTime<Local>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LaunchAgentInstallStatus {
+    Installed(PathBuf),
+    Updated(PathBuf),
+    Unchanged(PathBuf),
+}
+
+impl LaunchAgentInstallStatus {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Installed(path) | Self::Updated(path) | Self::Unchanged(path) => path.as_path(),
+        }
+    }
+
+    fn changed(&self) -> bool {
+        !matches!(self, Self::Unchanged(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StartDaemonResult {
+    AlreadyRunning { pid: u32 },
+    Started(LaunchctlServiceStatus),
+}
+
 #[derive(Debug)]
 struct ThumbnailDownload {
     url: String,
@@ -253,44 +282,30 @@ async fn main() -> Result<()> {
             DaemonCommand::Start => start_daemon(),
             DaemonCommand::Stop => stop_daemon(),
         },
-        None => run_tui().await,
+        Some(Command::InternalDaemon) => feedfold_daemon::run("feedfold").await,
+        None => {
+            if let Err(error) = ensure_persistent_daemon_on_launch() {
+                eprintln!("warning: failed to auto-start persistent daemon: {error:#}");
+            }
+            run_tui().await
+        }
     }
 }
 
 fn install_daemon() -> Result<()> {
     require_macos_daemon_command("install")?;
 
-    let home_dir = home_dir()?;
-    let plist_path = launch_agent_path(&home_dir);
-    let daemon_path =
-        daemon_binary_path(&std::env::current_exe().context("resolving current executable")?)?;
-    if !daemon_path.exists() {
-        anyhow::bail!(
-            "feedfoldd was not found next to feedfold at {}",
-            daemon_path.display()
-        );
-    }
-
-    let working_dir = daemon_path
-        .parent()
-        .context("daemon executable has no parent directory")?;
-    let plist = render_launchd_plist(&daemon_path, working_dir);
-    let status = match fs::read_to_string(&plist_path) {
-        Ok(existing) if existing == plist => "Launchd agent already up to date at",
-        _ => {
-            if let Some(parent) = plist_path.parent() {
-                fs::create_dir_all(parent).with_context(|| {
-                    format!("creating launch agent directory {}", parent.display())
-                })?;
-            }
-            fs::write(&plist_path, plist).with_context(|| {
-                format!("writing launch agent plist at {}", plist_path.display())
-            })?;
-            "Installed launchd agent at"
+    match install_or_update_launchd_agent()? {
+        LaunchAgentInstallStatus::Installed(path) => {
+            println!("Installed launchd agent at {}", path.display());
         }
-    };
-
-    println!("{status} {}", plist_path.display());
+        LaunchAgentInstallStatus::Updated(path) => {
+            println!("Updated launchd agent at {}", path.display());
+        }
+        LaunchAgentInstallStatus::Unchanged(path) => {
+            println!("Launchd agent already up to date at {}", path.display());
+        }
+    }
     Ok(())
 }
 
@@ -335,48 +350,12 @@ fn daemon_status() -> Result<()> {
 fn start_daemon() -> Result<()> {
     require_macos_daemon_command("start")?;
 
-    let plist_path = launch_agent_path(&home_dir()?);
-    if !plist_path.exists() {
-        anyhow::bail!(
-            "launchd agent is not installed at {}. Run `feedfold daemon install` first",
-            plist_path.display()
-        );
-    }
-
-    let (domain_target, service_target) = launchctl_targets()?;
-    match launchctl_service_status(&service_target)? {
-        LaunchctlServiceStatus::Loaded {
-            pid: Some(pid),
-            state,
-        } if state.as_deref() == Some("running") => {
+    match start_daemon_service()? {
+        StartDaemonResult::AlreadyRunning { pid } => {
             println!("Daemon already running with pid {pid}.");
-            return Ok(());
         }
-        LaunchctlServiceStatus::Loaded { .. } => {
-            let output = ProcessCommand::new("launchctl")
-                .arg("kickstart")
-                .arg("-p")
-                .arg(&service_target)
-                .output()
-                .context("running `launchctl kickstart`")?;
-            ensure_launchctl_success("kickstart", &output)?;
-
-            if let Some(pid) = parse_launchctl_pid(&String::from_utf8_lossy(&output.stdout)) {
-                println!("Started daemon with pid {pid}.");
-            } else {
-                println!("Started daemon.");
-            }
-        }
-        LaunchctlServiceStatus::Unloaded => {
-            let output = ProcessCommand::new("launchctl")
-                .arg("bootstrap")
-                .arg(&domain_target)
-                .arg(&plist_path)
-                .output()
-                .context("running `launchctl bootstrap`")?;
-            ensure_launchctl_success("bootstrap", &output)?;
-
-            print_started_daemon_status(&launchctl_service_status(&service_target)?);
+        StartDaemonResult::Started(status) => {
+            print_started_daemon_status(&status);
         }
     }
 
@@ -432,11 +411,119 @@ fn launch_agent_path(home_dir: &Path) -> PathBuf {
         .join(format!("{LAUNCHD_LABEL}.plist"))
 }
 
-fn daemon_binary_path(current_exe: &Path) -> Result<PathBuf> {
-    let exe_dir = current_exe
+fn ensure_persistent_daemon_on_launch() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+
+    let _ = start_daemon_service()?;
+    Ok(())
+}
+
+fn install_or_update_launchd_agent() -> Result<LaunchAgentInstallStatus> {
+    let plist_path = launch_agent_path(&home_dir()?);
+    let executable_path = std::env::current_exe().context("resolving current executable")?;
+    let working_dir = executable_path
         .parent()
         .context("current executable has no parent directory")?;
-    Ok(exe_dir.join(format!("feedfoldd{}", std::env::consts::EXE_SUFFIX)))
+    let plist = render_launchd_plist(&executable_path, working_dir);
+
+    if let Some(parent) = plist_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating launch agent directory {}", parent.display()))?;
+    }
+
+    let status = match fs::read_to_string(&plist_path) {
+        Ok(existing) if existing == plist => LaunchAgentInstallStatus::Unchanged(plist_path),
+        Ok(_) => {
+            fs::write(&plist_path, plist).with_context(|| {
+                format!("writing launch agent plist at {}", plist_path.display())
+            })?;
+            LaunchAgentInstallStatus::Updated(plist_path)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::write(&plist_path, plist).with_context(|| {
+                format!("writing launch agent plist at {}", plist_path.display())
+            })?;
+            LaunchAgentInstallStatus::Installed(plist_path)
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("reading launch agent plist at {}", plist_path.display())
+            });
+        }
+    };
+
+    Ok(status)
+}
+
+fn start_daemon_service() -> Result<StartDaemonResult> {
+    let install_status = install_or_update_launchd_agent()?;
+    let plist_path = install_status.path().to_path_buf();
+    let (domain_target, service_target) = launchctl_targets()?;
+    let service_status = launchctl_service_status(&service_target)?;
+
+    if !install_status.changed() {
+        if let LaunchctlServiceStatus::Loaded {
+            pid: Some(pid),
+            state,
+        } = &service_status
+        {
+            if state.as_deref() == Some("running") {
+                return Ok(StartDaemonResult::AlreadyRunning { pid: *pid });
+            }
+        }
+    }
+
+    if install_status.changed() && !matches!(service_status, LaunchctlServiceStatus::Unloaded) {
+        bootout_launchd_service(&service_target)?;
+        bootstrap_launchd_service(&domain_target, &plist_path)?;
+        return Ok(StartDaemonResult::Started(launchctl_service_status(
+            &service_target,
+        )?));
+    }
+
+    match service_status {
+        LaunchctlServiceStatus::Loaded { .. } => {
+            kickstart_launchd_service(&service_target)?;
+        }
+        LaunchctlServiceStatus::Unloaded => {
+            bootstrap_launchd_service(&domain_target, &plist_path)?;
+        }
+    }
+
+    Ok(StartDaemonResult::Started(launchctl_service_status(
+        &service_target,
+    )?))
+}
+
+fn bootstrap_launchd_service(domain_target: &str, plist_path: &Path) -> Result<()> {
+    let output = ProcessCommand::new("launchctl")
+        .arg("bootstrap")
+        .arg(domain_target)
+        .arg(plist_path)
+        .output()
+        .context("running `launchctl bootstrap`")?;
+    ensure_launchctl_success("bootstrap", &output)
+}
+
+fn kickstart_launchd_service(service_target: &str) -> Result<()> {
+    let output = ProcessCommand::new("launchctl")
+        .arg("kickstart")
+        .arg("-p")
+        .arg(service_target)
+        .output()
+        .context("running `launchctl kickstart`")?;
+    ensure_launchctl_success("kickstart", &output)
+}
+
+fn bootout_launchd_service(service_target: &str) -> Result<()> {
+    let output = ProcessCommand::new("launchctl")
+        .arg("bootout")
+        .arg(service_target)
+        .output()
+        .context("running `launchctl bootout`")?;
+    ensure_launchctl_success("bootout", &output)
 }
 
 fn launchctl_targets() -> Result<(String, String)> {
@@ -572,7 +659,7 @@ fn print_started_daemon_status(status: &LaunchctlServiceStatus) {
 fn daemon_pid_path() -> Result<PathBuf> {
     Ok(Storage::data_dir()
         .context("resolving daemon data directory")?
-        .join("feedfoldd.pid"))
+        .join(DAEMON_PID_FILE))
 }
 
 fn daemon_status_text() -> String {
@@ -640,8 +727,8 @@ fn format_daemon_started_at(started_at: DateTime<Local>) -> String {
     }
 }
 
-fn render_launchd_plist(daemon_path: &Path, working_dir: &Path) -> String {
-    let daemon = escape_xml_path(daemon_path);
+fn render_launchd_plist(executable_path: &Path, working_dir: &Path) -> String {
+    let executable = escape_xml_path(executable_path);
     let workdir = escape_xml_path(working_dir);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -652,7 +739,8 @@ fn render_launchd_plist(daemon_path: &Path, working_dir: &Path) -> String {
     <string>{LAUNCHD_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{daemon}</string>
+        <string>{executable}</string>
+        <string>{INTERNAL_DAEMON_SUBCOMMAND}</string>
     </array>
     <key>WorkingDirectory</key>
     <string>{workdir}</string>
@@ -4063,15 +4151,6 @@ mod tests {
     }
 
     #[test]
-    fn daemon_binary_path_uses_feedfold_sibling_directory() {
-        let current_exe = Path::new("/opt/feedfold/bin/feedfold");
-
-        let path = daemon_binary_path(current_exe).unwrap();
-
-        assert_eq!(path, PathBuf::from("/opt/feedfold/bin/feedfoldd"));
-    }
-
-    #[test]
     fn launchctl_service_target_uses_label_suffix() {
         let target = launchctl_service_target("gui/501");
 
@@ -4079,15 +4158,16 @@ mod tests {
     }
 
     #[test]
-    fn render_launchd_plist_embeds_escaped_paths() {
-        let daemon = Path::new("/tmp/feed & fold/bin/feedfoldd");
+    fn render_launchd_plist_embeds_escaped_paths_and_internal_daemon_mode() {
+        let daemon = Path::new("/tmp/feed & fold/bin/feedfold");
         let workdir = Path::new("/tmp/feed <fold>/bin");
 
         let plist = render_launchd_plist(daemon, workdir);
 
         assert!(plist.contains("<string>com.feedfold.feedfoldd</string>"));
-        assert!(plist.contains("/tmp/feed &amp; fold/bin/feedfoldd"));
+        assert!(plist.contains("/tmp/feed &amp; fold/bin/feedfold"));
         assert!(plist.contains("/tmp/feed &lt;fold&gt;/bin"));
+        assert!(plist.contains(&format!("<string>{INTERNAL_DAEMON_SUBCOMMAND}</string>")));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
     }

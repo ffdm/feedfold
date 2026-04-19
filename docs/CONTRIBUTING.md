@@ -46,8 +46,8 @@ you're tempted to add a `youtube_views` field to `Entry`, stop. Put it in
 `enrichments` instead.
 
 **Crates depend one direction.** `feedfold-daemon` and `feedfold-tui` depend
-on `feedfold-core`. Neither binary depends on the other. The core never
-depends on either.
+on `feedfold-core`, and `feedfold-tui` may depend on `feedfold-daemon`.
+The core never depends on either.
 
 **Adapters and rankers are traits.** Adding a new source type or ranking
 strategy should be a new file implementing a trait, not a change to
