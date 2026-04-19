@@ -59,7 +59,7 @@ Last updated: 2026-04-17
 
 ## Phase 6: Persistent daemon
 
-- [ ] 6.1 `feedfold daemon install` writing a `launchd` plist
+- [~] 6.1 `feedfold daemon install` writing a `launchd` plist
 - [ ] 6.2 `feedfold daemon status/start/stop` wrappers
 - [ ] 6.3 Pid file and log rotation
 
