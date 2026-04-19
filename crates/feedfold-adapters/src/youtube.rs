@@ -10,10 +10,10 @@ use serde::Deserialize;
 use crate::rss::RssAdapter;
 
 const YOUTUBE_CHANNELS_API_URL: &str = "https://www.googleapis.com/youtube/v3/channels";
-const YOUTUBE_PLAYLIST_ITEMS_API_URL: &str =
-    "https://www.googleapis.com/youtube/v3/playlistItems";
+const YOUTUBE_PLAYLIST_ITEMS_API_URL: &str = "https://www.googleapis.com/youtube/v3/playlistItems";
 const YOUTUBE_VIDEOS_API_URL: &str = "https://www.googleapis.com/youtube/v3/videos";
 const YOUTUBE_BATCH_SIZE: usize = 50;
+const YOUTUBE_PLAYER_MAX_DIMENSION: &str = "8192";
 pub const YOUTUBE_VIEW_COUNT_KEY: &str = "youtube_view_count";
 const YOUTUBE_LIKE_COUNT_KEY: &str = "youtube_like_count";
 const YOUTUBE_COMMENT_COUNT_KEY: &str = "youtube_comment_count";
@@ -21,6 +21,8 @@ pub const YOUTUBE_DURATION_KEY: &str = "youtube_duration";
 const YOUTUBE_CHANNEL_ID_KEY: &str = "youtube_channel_id";
 const YOUTUBE_CHANNEL_TITLE_KEY: &str = "youtube_channel_title";
 pub const YOUTUBE_LIVE_BROADCAST_KEY: &str = "youtube_live_broadcast";
+pub const YOUTUBE_EMBED_WIDTH_KEY: &str = "youtube_embed_width";
+pub const YOUTUBE_EMBED_HEIGHT_KEY: &str = "youtube_embed_height";
 
 pub struct YoutubeAdapter {
     rss: RssAdapter,
@@ -200,8 +202,10 @@ impl YoutubeAdapter {
                 .client
                 .get(&self.videos_api_url)
                 .query(&[
-                    ("part", "contentDetails,statistics,snippet"),
+                    ("part", "contentDetails,statistics,snippet,player"),
                     ("id", &batch.join(",")),
+                    ("maxWidth", YOUTUBE_PLAYER_MAX_DIMENSION),
+                    ("maxHeight", YOUTUBE_PLAYER_MAX_DIMENSION),
                     ("key", api_key),
                 ])
                 .send()
@@ -272,9 +276,7 @@ impl SourceAdapter for YoutubeAdapter {
                 self.apply_enrichments(&mut feed.entries, &enrichments);
                 Ok(feed)
             }
-            Err(AdapterError::Fetch(ref source))
-                if source.to_string().contains("404") =>
-            {
+            Err(AdapterError::Fetch(ref source)) if source.to_string().contains("404") => {
                 self.fetch_via_api(url).await
             }
             Err(e) => Err(e),
@@ -447,6 +449,8 @@ struct VideoItem {
     content_details: Option<ContentDetails>,
     #[serde(default)]
     statistics: Option<Statistics>,
+    #[serde(default)]
+    player: Option<Player>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -500,6 +504,14 @@ struct Statistics {
     comment_count: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct Player {
+    #[serde(default, rename = "embedWidth")]
+    embed_width: Option<u64>,
+    #[serde(default, rename = "embedHeight")]
+    embed_height: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct VideoEnrichment {
     view_count: Option<String>,
@@ -510,6 +522,8 @@ struct VideoEnrichment {
     channel_title: Option<String>,
     thumbnail_url: Option<String>,
     live_broadcast_content: Option<String>,
+    embed_width: Option<String>,
+    embed_height: Option<String>,
 }
 
 impl VideoEnrichment {
@@ -536,6 +550,12 @@ impl VideoEnrichment {
         }
         if let Some(value) = &self.live_broadcast_content {
             pairs.push((YOUTUBE_LIVE_BROADCAST_KEY.into(), value.clone()));
+        }
+        if let Some(value) = &self.embed_width {
+            pairs.push((YOUTUBE_EMBED_WIDTH_KEY.into(), value.clone()));
+        }
+        if let Some(value) = &self.embed_height {
+            pairs.push((YOUTUBE_EMBED_HEIGHT_KEY.into(), value.clone()));
         }
 
         pairs
@@ -581,6 +601,16 @@ impl From<VideoItem> for VideoEnrichment {
                 .snippet
                 .as_ref()
                 .and_then(|snippet| snippet.live_broadcast_content.clone()),
+            embed_width: item
+                .player
+                .as_ref()
+                .and_then(|player| player.embed_width)
+                .map(|value| value.to_string()),
+            embed_height: item
+                .player
+                .as_ref()
+                .and_then(|player| player.embed_height)
+                .map(|value| value.to_string()),
         }
     }
 }
@@ -695,7 +725,7 @@ mod tests {
     <updated>2026-04-01T12:00:00Z</updated>
   </entry>
 </feed>"#;
-        let api_body = r#"{"items":[{"id":"video-one","contentDetails":{"duration":"PT5M"},"statistics":{"viewCount":"123","likeCount":"9","commentCount":"2"},"snippet":{"channelId":"chan-1","channelTitle":"Feedfold Channel","thumbnails":{"high":{"url":"https://img.example/high.jpg"}}}}]}"#;
+        let api_body = r#"{"items":[{"id":"video-one","contentDetails":{"duration":"PT5M"},"statistics":{"viewCount":"123","likeCount":"9","commentCount":"2"},"snippet":{"channelId":"chan-1","channelTitle":"Feedfold Channel","thumbnails":{"high":{"url":"https://img.example/high.jpg"}}},"player":{"embedWidth":4608,"embedHeight":8192}}]}"#;
 
         let (rss_url, api_url, requests_handle) =
             spawn_test_server(vec![rss_body.to_owned(), api_body.to_owned()]).await;
@@ -708,11 +738,17 @@ mod tests {
         let entry = &feed.entries[0];
 
         assert_eq!(
-            entry.enrichments.get(YOUTUBE_VIEW_COUNT_KEY).map(|s| s.as_str()),
+            entry
+                .enrichments
+                .get(YOUTUBE_VIEW_COUNT_KEY)
+                .map(|s| s.as_str()),
             Some("123")
         );
         assert_eq!(
-            entry.enrichments.get(YOUTUBE_DURATION_KEY).map(|s| s.as_str()),
+            entry
+                .enrichments
+                .get(YOUTUBE_DURATION_KEY)
+                .map(|s| s.as_str()),
             Some("PT5M")
         );
         assert_eq!(
@@ -723,14 +759,30 @@ mod tests {
             Some("Feedfold Channel")
         );
         assert_eq!(
+            entry
+                .enrichments
+                .get(YOUTUBE_EMBED_WIDTH_KEY)
+                .map(|s| s.as_str()),
+            Some("4608")
+        );
+        assert_eq!(
+            entry
+                .enrichments
+                .get(YOUTUBE_EMBED_HEIGHT_KEY)
+                .map(|s| s.as_str()),
+            Some("8192")
+        );
+        assert_eq!(
             entry.thumbnail_url.as_deref(),
             Some("https://img.example/high.jpg")
         );
 
         let requests = requests_handle.await.unwrap();
         assert_eq!(requests.len(), 2);
-        assert!(requests[1].contains("part=contentDetails%2Cstatistics%2Csnippet"));
+        assert!(requests[1].contains("part=contentDetails%2Cstatistics%2Csnippet%2Cplayer"));
         assert!(requests[1].contains("id=video-one"));
+        assert!(requests[1].contains("maxWidth=8192"));
+        assert!(requests[1].contains("maxHeight=8192"));
         assert!(requests[1].contains("key=test-key"));
     }
 
@@ -745,15 +797,21 @@ mod tests {
         let adapter = YoutubeAdapter::with_client_and_api_key(client, Some("test-key".into()))
             .with_api_urls(String::new(), String::new(), api_url);
 
-        let video_ids = (0..51).map(|index| format!("video-{index:03}")).collect::<Vec<_>>();
+        let video_ids = (0..51)
+            .map(|index| format!("video-{index:03}"))
+            .collect::<Vec<_>>();
         let enrichments = adapter.fetch_video_enrichments(&video_ids).await.unwrap();
 
         assert_eq!(
-            enrichments.get("video-000").and_then(|item| item.view_count.as_deref()),
+            enrichments
+                .get("video-000")
+                .and_then(|item| item.view_count.as_deref()),
             Some("1")
         );
         assert_eq!(
-            enrichments.get("video-050").and_then(|item| item.view_count.as_deref()),
+            enrichments
+                .get("video-050")
+                .and_then(|item| item.view_count.as_deref()),
             Some("2")
         );
 
@@ -815,16 +873,17 @@ mod tests {
                 format!("{base}/videos"),
             );
 
-        let feed_url = format!(
-            "{base}/feeds/videos.xml?channel_id=UC123"
-        );
+        let feed_url = format!("{base}/feeds/videos.xml?channel_id=UC123");
         let feed = adapter.fetch(&feed_url).await.unwrap();
 
         assert_eq!(feed.entries.len(), 1);
         assert_eq!(feed.entries[0].external_id, "yt:video:vid-1");
         assert_eq!(feed.entries[0].title, "Fallback Video");
         assert_eq!(
-            feed.entries[0].enrichments.get(YOUTUBE_VIEW_COUNT_KEY).map(|s| s.as_str()),
+            feed.entries[0]
+                .enrichments
+                .get(YOUTUBE_VIEW_COUNT_KEY)
+                .map(|s| s.as_str()),
             Some("99")
         );
     }

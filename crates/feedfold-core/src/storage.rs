@@ -310,7 +310,11 @@ impl Storage {
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn update_source_top_n(&self, source_id: i64, top_n: Option<u32>) -> Result<(), StorageError> {
+    pub fn update_source_top_n(
+        &self,
+        source_id: i64,
+        top_n: Option<u32>,
+    ) -> Result<(), StorageError> {
         self.conn.execute(
             "UPDATE sources SET top_n_override = ?1 WHERE id = ?2",
             params![top_n, source_id],
@@ -319,10 +323,8 @@ impl Storage {
     }
 
     pub fn delete_source(&self, source_id: i64) -> Result<(), StorageError> {
-        self.conn.execute(
-            "DELETE FROM sources WHERE id = ?1",
-            params![source_id],
-        )?;
+        self.conn
+            .execute("DELETE FROM sources WHERE id = ?1", params![source_id])?;
         Ok(())
     }
 
@@ -476,10 +478,7 @@ impl Storage {
             let entry_id: i64 = row.get(0)?;
             let key: String = row.get(1)?;
             let value: String = row.get(2)?;
-            enrichments
-                .entry(entry_id)
-                .or_default()
-                .insert(key, value);
+            enrichments.entry(entry_id).or_default().insert(key, value);
         }
         Ok(enrichments)
     }
@@ -602,10 +601,7 @@ impl Storage {
              FROM entries WHERE displayed_in_top_n = 1 AND state IN (?1, ?2) \
              ORDER BY score DESC, published_at DESC",
         )?;
-        let rows = stmt.query_map(
-            [EntryState::New, EntryState::Starred],
-            row_to_entry,
-        )?;
+        let rows = stmt.query_map([EntryState::New, EntryState::Starred], row_to_entry)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -624,10 +620,7 @@ impl Storage {
              ORDER BY COALESCE(v.last_viewed_at, entries.fetched_at) DESC, \
                       entries.fetched_at DESC",
         )?;
-        let rows = stmt.query_map(
-            [EntryState::Viewed, EntryState::Starred],
-            row_to_entry,
-        )?;
+        let rows = stmt.query_map([EntryState::Viewed, EntryState::Starred], row_to_entry)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 

@@ -1,9 +1,11 @@
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::fs;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
@@ -26,8 +28,8 @@ use ratatui::{
 use viuer::KittySupport;
 
 use feedfold_adapters::{
-    RssAdapter, YoutubeAdapter, YOUTUBE_DURATION_KEY, YOUTUBE_LIVE_BROADCAST_KEY,
-    YOUTUBE_VIEW_COUNT_KEY,
+    RssAdapter, YoutubeAdapter, YOUTUBE_DURATION_KEY, YOUTUBE_EMBED_HEIGHT_KEY,
+    YOUTUBE_EMBED_WIDTH_KEY, YOUTUBE_LIVE_BROADCAST_KEY, YOUTUBE_VIEW_COUNT_KEY,
 };
 use feedfold_core::adapter::SourceAdapter;
 use feedfold_core::config::{AdapterType, ChannelSort, Config, RankingMode};
@@ -39,6 +41,7 @@ use feedfold_core::VERSION;
 mod opml;
 
 const THUMBNAIL_HEIGHT: u16 = 12;
+const YOUTUBE_SHORTS_2024_EXPANSION_AT: &str = "2024-10-15T00:00:00Z";
 
 #[derive(Debug, Parser)]
 #[command(name = "feedfold", version = VERSION, about = "Terminal RSS reader")]
@@ -174,6 +177,18 @@ enum ThumbnailStatus {
     Failed(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusKind {
+    Info,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusMessage {
+    text: String,
+    kind: StatusKind,
+}
+
 #[derive(Debug)]
 struct ThumbnailDownload {
     url: String,
@@ -212,9 +227,17 @@ async fn run_tui() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let last_poll_at = storage.last_poll_at().ok().flatten();
-    let mut app = App::new(entries, sources, config, detect_thumbnail_mode(), thumbnail_dir);
+    let mut app = App::new(
+        entries,
+        sources,
+        config,
+        detect_thumbnail_mode(),
+        thumbnail_dir,
+    );
     app.last_poll_at = last_poll_at;
-    let _ = trigger_refresh(&mut app, &mut storage);
+    if let Err(error) = trigger_refresh(&mut app, &mut storage) {
+        app.set_error(format!("Refresh failed: {error:#}"));
+    }
     let res = run_app(&mut terminal, &mut app, &mut storage);
 
     disable_raw_mode()?;
@@ -228,31 +251,46 @@ fn trigger_refresh(app: &mut App, storage: &mut Storage) -> Result<()> {
     let sources = storage.list_sources()?;
 
     for source in &sources {
-        let top_n = source.top_n_override.unwrap_or(app.config.general.default_top_n) as usize;
-        let mode = app.config.sources.iter().find(|s| s.url == source.url).and_then(|s| s.ranking).unwrap_or(app.config.ranking.mode);
+        let top_n = source
+            .top_n_override
+            .unwrap_or(app.config.general.default_top_n) as usize;
+        let mode = app
+            .config
+            .sources
+            .iter()
+            .find(|s| s.url == source.url)
+            .and_then(|s| s.ranking)
+            .unwrap_or(app.config.ranking.mode);
 
-        if let Ok(entries) = storage.list_entries_for_source(source.id) {
-            if let Ok(enrichments) = storage.list_enrichments_for_source(source.id) {
-                let candidates: Vec<Entry> = entries
-                    .into_iter()
-                    .filter(|e| matches!(e.state, EntryState::New | EntryState::Starred))
-                    .collect();
-                let ctx = feedfold_core::ranker::RankContext {
-                    top_n,
-                    enrichments,
-                };
-                let scores = match mode {
-                    RankingMode::Recency => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::RecencyRanker, &candidates, &ctx),
-                    RankingMode::Popularity => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::PopularityRanker, &candidates, &ctx),
-                    RankingMode::Claude => feedfold_core::ranker::Ranker::rank(&feedfold_core::ranker::RecencyRanker, &candidates, &ctx),
-                };
-                let _ = storage.apply_ranking(source.id, &scores, top_n);
-            }
-        }
+        let entries = storage.list_entries_for_source(source.id)?;
+        let enrichments = storage.list_enrichments_for_source(source.id)?;
+        let candidates: Vec<Entry> = entries
+            .into_iter()
+            .filter(|e| matches!(e.state, EntryState::New | EntryState::Starred))
+            .collect();
+        let ctx = feedfold_core::ranker::RankContext { top_n, enrichments };
+        let scores = match mode {
+            RankingMode::Recency => feedfold_core::ranker::Ranker::rank(
+                &feedfold_core::ranker::RecencyRanker,
+                &candidates,
+                &ctx,
+            ),
+            RankingMode::Popularity => feedfold_core::ranker::Ranker::rank(
+                &feedfold_core::ranker::PopularityRanker,
+                &candidates,
+                &ctx,
+            ),
+            RankingMode::Claude => feedfold_core::ranker::Ranker::rank(
+                &feedfold_core::ranker::RecencyRanker,
+                &candidates,
+                &ctx,
+            ),
+        };
+        storage.apply_ranking(source.id, &scores, top_n)?;
     }
 
     app.sources = sources.into_iter().map(|s| (s.id, s)).collect();
-    let _ = storage.set_last_poll_at(Utc::now());
+    storage.set_last_poll_at(Utc::now())?;
     refresh_view(app, storage)?;
     Ok(())
 }
@@ -291,6 +329,7 @@ struct App {
     thumbnail_tx: Sender<ThumbnailDownload>,
     thumbnail_rx: Receiver<ThumbnailDownload>,
     undo_stack: Vec<UndoAction>,
+    status_message: Option<StatusMessage>,
 }
 
 impl App {
@@ -332,6 +371,7 @@ impl App {
             thumbnail_tx,
             thumbnail_rx,
             undo_stack: Vec::new(),
+            status_message: None,
         }
     }
 
@@ -426,31 +466,24 @@ impl App {
 
     fn rebuild_channel_rows(&mut self) {
         use std::collections::hash_map::Entry as HEntry;
-        let mut order: Vec<i64> = Vec::new();
-        let mut groups: HashMap<i64, (String, Vec<Entry>)> = HashMap::new();
+        let mut groups: HashMap<i64, Vec<Entry>> = HashMap::new();
         for entry in &self.entries {
             match groups.entry(entry.source_id) {
                 HEntry::Vacant(slot) => {
-                    order.push(entry.source_id);
-                    let name = self
-                        .sources
-                        .get(&entry.source_id)
-                        .map(|s| s.name.clone())
-                        .or_else(|| entry.author.clone())
-                        .unwrap_or_else(|| "Unknown".to_string());
-                    slot.insert((name, vec![entry.clone()]));
+                    slot.insert(vec![entry.clone()]);
                 }
                 HEntry::Occupied(mut slot) => {
-                    slot.get_mut().1.push(entry.clone());
+                    slot.get_mut().push(entry.clone());
                 }
             }
         }
 
         let sort = self.channel_sort;
         let stats = &self.channel_stats;
+        let mut order: Vec<i64> = self.sources.keys().copied().collect();
         order.sort_by(|a, b| {
-            let name_a = groups.get(a).map(|g| g.0.as_str()).unwrap_or("");
-            let name_b = groups.get(b).map(|g| g.0.as_str()).unwrap_or("");
+            let name_a = self.sources.get(a).map(|s| s.name.as_str()).unwrap_or("");
+            let name_b = self.sources.get(b).map(|s| s.name.as_str()).unwrap_or("");
             let name_cmp = name_a.to_lowercase().cmp(&name_b.to_lowercase());
             match sort {
                 ChannelSort::Alphabetical => name_cmp,
@@ -481,14 +514,19 @@ impl App {
 
         let mut rows = Vec::new();
         for source_id in order {
-            let Some((name, entries)) = groups.remove(&source_id) else {
+            let Some(source) = self.sources.get(&source_id) else {
                 continue;
             };
+            let entries = groups.remove(&source_id).unwrap_or_default();
             let expanded = self.channels_expanded.contains(&source_id);
-            let count = entries.len();
+            let count = self
+                .channel_stats
+                .get(&source_id)
+                .map(|stats| stats.total)
+                .unwrap_or(entries.len());
             rows.push(ChannelRow::Header {
                 source_id,
-                name,
+                name: source.name.clone(),
                 count,
                 expanded,
             });
@@ -712,6 +750,30 @@ impl App {
         self.thumbnail_cache
             .insert(url, ThumbnailStatus::Failed(error));
     }
+
+    fn set_status(&mut self, text: impl Into<String>, kind: StatusKind) {
+        self.status_message = Some(StatusMessage {
+            text: text.into(),
+            kind,
+        });
+    }
+
+    fn set_info(&mut self, text: impl Into<String>) {
+        self.set_status(text, StatusKind::Info);
+    }
+
+    fn set_error(&mut self, text: impl Into<String>) {
+        self.set_status(text, StatusKind::Error);
+    }
+}
+
+fn open_channels_manager(app: &mut App, storage: &Storage) -> Result<()> {
+    let sources = storage.list_sources()?;
+    app.overlay = Overlay::ChannelsManager(ChannelsManagerState {
+        sources,
+        selected: 0,
+    });
+    Ok(())
 }
 
 fn run_app(
@@ -750,19 +812,25 @@ fn run_app(
                             let had_query = app.search_query().is_some();
                             app.finish_search();
                             if had_query && !app.is_search_active() {
-                                refresh_view(app, storage)?;
+                                if let Err(error) = refresh_view(app, storage) {
+                                    app.set_error(format!("Search refresh failed: {error:#}"));
+                                }
                             }
                             needs_redraw = true;
                         }
                         KeyCode::Backspace => {
                             if app.pop_search_char() {
-                                refresh_view(app, storage)?;
+                                if let Err(error) = refresh_view(app, storage) {
+                                    app.set_error(format!("Search refresh failed: {error:#}"));
+                                }
                                 needs_redraw = true;
                             }
                         }
                         KeyCode::Char(c) => {
                             app.push_search_char(c);
-                            refresh_view(app, storage)?;
+                            if let Err(error) = refresh_view(app, storage) {
+                                app.set_error(format!("Search refresh failed: {error:#}"));
+                            }
                             needs_redraw = true;
                         }
                         _ => {}
@@ -794,7 +862,10 @@ fn run_app(
                                 0 => settings.top_n = settings.top_n.saturating_add(1).min(50),
                                 1 => settings.ranking_mode = settings.ranking_mode.cycle_next(),
                                 2 => settings.channel_sort = settings.channel_sort.cycle_next(),
-                                3 => settings.poll_interval = settings.poll_interval.saturating_add(5).min(1440),
+                                3 => {
+                                    settings.poll_interval =
+                                        settings.poll_interval.saturating_add(5).min(1440)
+                                }
                                 4 => settings.show_shorts = !settings.show_shorts,
                                 5 => settings.show_live = !settings.show_live,
                                 6 => settings.show_premieres = !settings.show_premieres,
@@ -802,7 +873,9 @@ fn run_app(
                                     app.overlay = Overlay::None;
                                     app.clear_search();
                                     app.set_view(ActiveView::Ignored);
-                                    refresh_view(app, storage)?;
+                                    if let Err(error) = refresh_view(app, storage) {
+                                        app.set_error(format!("Switching views failed: {error:#}"));
+                                    }
                                 }
                                 _ => {}
                             }
@@ -819,7 +892,10 @@ fn run_app(
                                     };
                                 }
                                 2 => settings.channel_sort = settings.channel_sort.cycle_prev(),
-                                3 => settings.poll_interval = settings.poll_interval.saturating_sub(5).max(5),
+                                3 => {
+                                    settings.poll_interval =
+                                        settings.poll_interval.saturating_sub(5).max(5)
+                                }
                                 4 => settings.show_shorts = !settings.show_shorts,
                                 5 => settings.show_live = !settings.show_live,
                                 6 => settings.show_premieres = !settings.show_premieres,
@@ -832,7 +908,9 @@ fn run_app(
                                 app.overlay = Overlay::None;
                                 app.clear_search();
                                 app.set_view(ActiveView::Ignored);
-                                refresh_view(app, storage)?;
+                                if let Err(error) = refresh_view(app, storage) {
+                                    app.set_error(format!("Switching views failed: {error:#}"));
+                                }
                             } else {
                                 let settings = settings.clone();
                                 app.config.general.default_top_n = settings.top_n;
@@ -843,9 +921,13 @@ fn run_app(
                                 app.config.youtube.show_shorts = settings.show_shorts;
                                 app.config.youtube.show_live = settings.show_live;
                                 app.config.youtube.show_premieres = settings.show_premieres;
-                                let _ = app.config.save();
+                                if let Err(error) = app.config.save() {
+                                    app.set_error(format!("Saving config failed: {error:#}"));
+                                }
                                 app.overlay = Overlay::None;
-                                refresh_view(app, storage)?;
+                                if let Err(error) = refresh_view(app, storage) {
+                                    app.set_error(format!("Refreshing view failed: {error:#}"));
+                                }
                             }
                             needs_redraw = true;
                         }
@@ -872,10 +954,16 @@ fn run_app(
                             if let Ok(n) = buf.parse::<u32>() {
                                 let n = n.clamp(1, 50);
                                 app.config.general.default_top_n = n;
-                                let _ = app.config.save();
+                                if let Err(error) = app.config.save() {
+                                    app.set_error(format!("Saving config failed: {error:#}"));
+                                }
+                            } else {
+                                app.set_error("Top N must be a number between 1 and 50");
                             }
                             app.overlay = Overlay::None;
-                            refresh_view(app, storage)?;
+                            if let Err(error) = refresh_view(app, storage) {
+                                app.set_error(format!("Refreshing view failed: {error:#}"));
+                            }
                             needs_redraw = true;
                         }
                         _ => {}
@@ -908,16 +996,40 @@ fn run_app(
                         KeyCode::Char('d') => {
                             if !state.sources.is_empty() {
                                 let id = state.sources[state.selected].id;
-                                if storage.delete_source(id).is_ok() {
-                                    if let Ok(sources) = storage.list_sources() {
-                                        app.sources = sources.iter().cloned().map(|s| (s.id, s)).collect();
-                                        state.sources = sources;
-                                        if state.selected >= state.sources.len() {
-                                            state.selected = state.sources.len().saturating_sub(1);
+                                match storage.delete_source(id) {
+                                    Ok(()) => {
+                                        match storage.list_sources() {
+                                            Ok(sources) => {
+                                                app.sources = sources
+                                                    .iter()
+                                                    .cloned()
+                                                    .map(|s| (s.id, s))
+                                                    .collect();
+                                                state.sources = sources;
+                                                if state.selected >= state.sources.len() {
+                                                    state.selected =
+                                                        state.sources.len().saturating_sub(1);
+                                                }
+                                            }
+                                            Err(error) => app.set_error(format!(
+                                                "Reloading channels failed: {error:#}"
+                                            )),
                                         }
+                                        if let Err(error) = refresh_view(app, storage) {
+                                            app.set_error(format!(
+                                                "Refreshing view failed: {error:#}"
+                                            ));
+                                        } else {
+                                            app.set_info("Channel deleted");
+                                        }
+                                        needs_redraw = true;
                                     }
-                                    let _ = refresh_view(app, storage);
-                                    needs_redraw = true;
+                                    Err(error) => {
+                                        app.set_error(format!(
+                                            "Deleting channel failed: {error:#}"
+                                        ));
+                                        needs_redraw = true;
+                                    }
                                 }
                             }
                         }
@@ -933,13 +1045,9 @@ fn run_app(
                 if let Overlay::AddChannelInput(ref mut buf) = app.overlay {
                     match key.code {
                         KeyCode::Esc => {
-                            if let Ok(sources) = storage.list_sources() {
-                                app.overlay = Overlay::ChannelsManager(ChannelsManagerState {
-                                    sources,
-                                    selected: 0,
-                                });
-                            } else {
+                            if let Err(error) = open_channels_manager(app, storage) {
                                 app.overlay = Overlay::None;
+                                app.set_error(format!("Loading channels failed: {error:#}"));
                             }
                             needs_redraw = true;
                         }
@@ -953,25 +1061,40 @@ fn run_app(
                         }
                         KeyCode::Enter => {
                             let url = buf.trim().to_string();
-                            if !url.is_empty() {
-                                let new_source = feedfold_core::storage::NewSource {
-                                    name: url.clone(),
-                                    url: url.clone(),
-                                    adapter: adapter_for_url(&url),
-                                    top_n_override: None,
-                                };
-                                let _ = storage.insert_source(&new_source);
+                            if url.is_empty() {
+                                app.set_error("Enter a URL to add a channel");
+                                needs_redraw = true;
+                                continue;
                             }
-                            if let Ok(sources) = storage.list_sources() {
-                                app.sources = sources.iter().cloned().map(|s| (s.id, s)).collect();
-                                app.overlay = Overlay::ChannelsManager(ChannelsManagerState {
-                                    sources,
-                                    selected: 0,
-                                });
-                            } else {
-                                app.overlay = Overlay::None;
+
+                            match block_on_async(add_feed_with_storage(storage, &url, None)) {
+                                Ok(outcome) => {
+                                    if let Err(error) = trigger_refresh(app, storage) {
+                                        app.set_error(format!("Refresh failed: {error:#}"));
+                                    } else {
+                                        let action = if outcome.already_tracked {
+                                            "Refreshed"
+                                        } else {
+                                            "Added"
+                                        };
+                                        app.set_info(format!(
+                                            "{action} {}: {} new ({} in feed)",
+                                            outcome.source_name,
+                                            outcome.new_entries,
+                                            outcome.total_entries
+                                        ));
+                                    }
+                                    if let Err(error) = open_channels_manager(app, storage) {
+                                        app.overlay = Overlay::None;
+                                        app.set_error(format!(
+                                            "Loading channels failed: {error:#}"
+                                        ));
+                                    }
+                                }
+                                Err(error) => {
+                                    app.set_error(format!("Adding channel failed: {error:#}"));
+                                }
                             }
-                            let _ = refresh_view(app, storage);
                             needs_redraw = true;
                         }
                         _ => {}
@@ -1026,7 +1149,9 @@ fn run_app(
                     KeyCode::Esc => {
                         if app.is_search_active() {
                             app.clear_search();
-                            refresh_view(app, storage)?;
+                            if let Err(error) = refresh_view(app, storage) {
+                                app.set_error(format!("Refreshing view failed: {error:#}"));
+                            }
                             needs_redraw = true;
                         }
                     }
@@ -1034,14 +1159,18 @@ fn run_app(
                         let next = app.active_view.next();
                         app.clear_search();
                         app.set_view(next);
-                        refresh_view(app, storage)?;
+                        if let Err(error) = refresh_view(app, storage) {
+                            app.set_error(format!("Switching views failed: {error:#}"));
+                        }
                         needs_redraw = true;
                     }
                     KeyCode::BackTab => {
                         let prev = app.active_view.previous();
                         app.clear_search();
                         app.set_view(prev);
-                        refresh_view(app, storage)?;
+                        if let Err(error) = refresh_view(app, storage) {
+                            app.set_error(format!("Switching views failed: {error:#}"));
+                        }
                         needs_redraw = true;
                     }
                     KeyCode::Char('S') => {
@@ -1049,22 +1178,22 @@ fn run_app(
                         needs_redraw = true;
                     }
                     KeyCode::Char('C') => {
-                        if let Ok(sources) = storage.list_sources() {
-                            app.overlay = Overlay::ChannelsManager(ChannelsManagerState {
-                                sources,
-                                selected: 0,
-                            });
-                            needs_redraw = true;
+                        if let Err(error) = open_channels_manager(app, storage) {
+                            app.set_error(format!("Loading channels failed: {error:#}"));
                         }
+                        needs_redraw = true;
                     }
                     KeyCode::Char('n') => {
-                        app.overlay = Overlay::TopNInput(
-                            app.config.general.default_top_n.to_string(),
-                        );
+                        app.overlay =
+                            Overlay::TopNInput(app.config.general.default_top_n.to_string());
                         needs_redraw = true;
                     }
                     KeyCode::Char('r') => {
-                        trigger_refresh(app, storage)?;
+                        if let Err(error) = trigger_refresh(app, storage) {
+                            app.set_error(format!("Refresh failed: {error:#}"));
+                        } else {
+                            app.set_info("Refresh complete");
+                        }
                         needs_redraw = true;
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
@@ -1081,36 +1210,60 @@ fn run_app(
                             let id = entry.id;
                             let prev_rating = entry.rating;
                             if prev_rating != Some(rating) {
-                                storage.set_entry_rating(id, rating)?;
-                                entry.rating = Some(rating);
-                                app.push_undo(UndoAction::SetRating { id, prev_rating });
+                                match storage.set_entry_rating(id, rating) {
+                                    Ok(()) => {
+                                        entry.rating = Some(rating);
+                                        app.push_undo(UndoAction::SetRating { id, prev_rating });
+                                    }
+                                    Err(error) => {
+                                        app.set_error(format!("Saving rating failed: {error:#}"));
+                                    }
+                                }
                                 needs_redraw = true;
                             }
                         }
                     }
-                    KeyCode::Char('s') => {
-                        if let Some((id, prev_state)) = toggle_star_for_selected(app, storage)? {
+                    KeyCode::Char('s') => match toggle_star_for_selected(app, storage) {
+                        Ok(Some((id, prev_state))) => {
                             app.push_undo(UndoAction::SetState { id, prev_state });
                             needs_redraw = true;
                         }
-                    }
-                    KeyCode::Char('i') => {
-                        if let Some((id, prev_state)) = toggle_ignore_for_selected(app, storage)? {
+                        Ok(None) => {}
+                        Err(error) => {
+                            app.set_error(format!("Updating star failed: {error:#}"));
+                            needs_redraw = true;
+                        }
+                    },
+                    KeyCode::Char('i') => match toggle_ignore_for_selected(app, storage) {
+                        Ok(Some((id, prev_state))) => {
                             app.push_undo(UndoAction::SetState { id, prev_state });
                             needs_redraw = true;
                         }
-                    }
-                    KeyCode::Char('v') => {
-                        if let Some(action) = toggle_viewed_for_selected(app, storage)? {
+                        Ok(None) => {}
+                        Err(error) => {
+                            app.set_error(format!("Ignoring entry failed: {error:#}"));
+                            needs_redraw = true;
+                        }
+                    },
+                    KeyCode::Char('v') => match toggle_viewed_for_selected(app, storage) {
+                        Ok(Some(action)) => {
                             app.push_undo(action);
                             needs_redraw = true;
                         }
-                    }
-                    KeyCode::Char('u') => {
-                        if apply_undo(app, storage)? {
+                        Ok(None) => {}
+                        Err(error) => {
+                            app.set_error(format!("Updating viewed state failed: {error:#}"));
                             needs_redraw = true;
                         }
-                    }
+                    },
+                    KeyCode::Char('u') => match apply_undo(app, storage) {
+                        Ok(true) => needs_redraw = true,
+                        Ok(false) => {}
+                        Err(error) => {
+                            app.set_error(format!("Undo failed: {error:#}"));
+                            needs_redraw = true;
+                        }
+                    },
                     KeyCode::Enter => {
                         if let Some(source_id) = app.selected_channel_header_source() {
                             app.toggle_channel(source_id);
@@ -1120,23 +1273,30 @@ fn run_app(
                                 (entry.id, entry.url.clone(), entry.state == EntryState::New)
                             })
                         {
-                            let _ = open::that(&url);
-                            storage.record_entry_view(entry_id)?;
-                            app.viewed_today_count = storage.count_entries_viewed_today()?;
-
-                            if let Some(entry) = app.selected_entry_mut() {
-                                if was_new {
-                                    entry.state = EntryState::Viewed;
+                            if let Err(error) = open::that(&url) {
+                                app.set_error(format!("Opening URL failed: {error}"));
+                            } else if let Err(error) = storage.record_entry_view(entry_id) {
+                                app.set_error(format!("Recording view failed: {error:#}"));
+                            } else if let Ok(count) = storage.count_entries_viewed_today() {
+                                app.viewed_today_count = count;
+                                if let Some(entry) = app.selected_entry_mut() {
+                                    if was_new {
+                                        entry.state = EntryState::Viewed;
+                                    }
                                 }
-                            }
 
-                            if !app.is_search_active()
-                                && matches!(
-                                    app.active_view,
-                                    ActiveView::Viewed | ActiveView::Overflow
-                                )
-                            {
-                                refresh_view(app, storage)?;
+                                if !app.is_search_active()
+                                    && matches!(
+                                        app.active_view,
+                                        ActiveView::Viewed | ActiveView::Overflow
+                                    )
+                                {
+                                    if let Err(error) = refresh_view(app, storage) {
+                                        app.set_error(format!("Refreshing view failed: {error:#}"));
+                                    }
+                                }
+                            } else {
+                                app.set_error("Counting viewed entries failed");
                             }
 
                             needs_redraw = true;
@@ -1167,7 +1327,11 @@ fn load_entries_for_view(
                     .as_deref()
                     .unwrap_or("")
                     .cmp(b.author.as_deref().unwrap_or(""))
-                    .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+                    .then(
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                    )
             });
             Ok(entries)
         }
@@ -1209,13 +1373,8 @@ fn toggle_ignore_for_selected(
     Ok(Some((entry_id, prev_state)))
 }
 
-fn toggle_viewed_for_selected(
-    app: &mut App,
-    storage: &mut Storage,
-) -> Result<Option<UndoAction>> {
-    let Some((entry_id, prev_state)) = app
-        .selected_entry()
-        .map(|entry| (entry.id, entry.state))
+fn toggle_viewed_for_selected(app: &mut App, storage: &mut Storage) -> Result<Option<UndoAction>> {
+    let Some((entry_id, prev_state)) = app.selected_entry().map(|entry| (entry.id, entry.state))
     else {
         return Ok(None);
     };
@@ -1317,13 +1476,13 @@ fn apply_undo(app: &mut App, storage: &mut Storage) -> Result<bool> {
 fn refresh_view(app: &mut App, storage: &Storage) -> Result<()> {
     let mut entries = load_entries_for_view(storage, app.active_view, app.search_query())?;
     filter_youtube_content(storage, &mut entries, &app.config)?;
+    if app.active_view == ActiveView::Channels {
+        app.channel_stats = storage.channel_stats()?;
+    }
     let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
     app.entry_enrichments = storage.get_enrichments_for_entries(&ids)?;
     app.replace_entries(entries);
     app.last_poll_at = storage.last_poll_at().ok().flatten();
-    if app.active_view == ActiveView::Channels {
-        app.channel_stats = storage.channel_stats().unwrap_or_default();
-    }
     if app.active_view == ActiveView::Viewed {
         app.viewed_today_count = storage.count_entries_viewed_today()?;
     }
@@ -1351,6 +1510,81 @@ fn parse_iso8601_duration_seconds(duration: &str) -> Option<u64> {
     Some(total)
 }
 
+fn parse_youtube_shorts_expansion_at() -> DateTime<Utc> {
+    static SHORTS_EXPANSION_AT: OnceLock<DateTime<Utc>> = OnceLock::new();
+
+    *SHORTS_EXPANSION_AT.get_or_init(|| {
+        DateTime::parse_from_rfc3339(YOUTUBE_SHORTS_2024_EXPANSION_AT)
+            .expect("valid YouTube Shorts cutoff timestamp")
+            .to_utc()
+    })
+}
+
+fn parse_u64_enrichment(enrichments: &HashMap<String, String>, key: &str) -> Option<u64> {
+    enrichments.get(key)?.parse().ok()
+}
+
+fn has_shorts_text_hint(entry: &Entry) -> bool {
+    let title_lower = entry.title.to_lowercase();
+    let summary_lower = entry.summary.as_deref().unwrap_or("").to_lowercase();
+    let url_lower = entry.url.to_lowercase();
+
+    title_lower.contains("#shorts")
+        || summary_lower.contains("#shorts")
+        || url_lower.contains("/shorts/")
+}
+
+fn has_square_or_vertical_player(enrichments: &HashMap<String, String>) -> bool {
+    let Some(width) = parse_u64_enrichment(enrichments, YOUTUBE_EMBED_WIDTH_KEY) else {
+        return false;
+    };
+    let Some(height) = parse_u64_enrichment(enrichments, YOUTUBE_EMBED_HEIGHT_KEY) else {
+        return false;
+    };
+
+    height >= width
+}
+
+fn has_player_orientation(enrichments: &HashMap<String, String>) -> bool {
+    parse_u64_enrichment(enrichments, YOUTUBE_EMBED_WIDTH_KEY).is_some()
+        && parse_u64_enrichment(enrichments, YOUTUBE_EMBED_HEIGHT_KEY).is_some()
+}
+
+fn youtube_short_duration_limit(entry: &Entry) -> u64 {
+    let Some(published_at) = entry.published_at else {
+        return 60;
+    };
+
+    if published_at >= parse_youtube_shorts_expansion_at() {
+        180
+    } else {
+        60
+    }
+}
+
+fn is_probable_youtube_short(entry: &Entry, enrichments: &HashMap<String, String>) -> bool {
+    if has_shorts_text_hint(entry) {
+        return true;
+    }
+
+    let Some(duration) = enrichments.get(YOUTUBE_DURATION_KEY) else {
+        return false;
+    };
+    let Some(seconds) = parse_iso8601_duration_seconds(duration) else {
+        return false;
+    };
+
+    if !has_player_orientation(enrichments) {
+        return seconds <= 60;
+    }
+
+    if !has_square_or_vertical_player(enrichments) {
+        return false;
+    }
+
+    seconds <= youtube_short_duration_limit(entry)
+}
+
 fn filter_youtube_content(
     storage: &Storage,
     entries: &mut Vec<Entry>,
@@ -1369,20 +1603,8 @@ fn filter_youtube_content(
         };
 
         if !config.youtube.show_shorts {
-            let title_lower = entry.title.to_lowercase();
-            let summary_lower = entry.summary.as_deref().unwrap_or("").to_lowercase();
-            let url_lower = entry.url.to_lowercase();
-            
-            if title_lower.contains("#shorts") || summary_lower.contains("#shorts") || url_lower.contains("shorts") {
+            if is_probable_youtube_short(entry, entry_enrichments) {
                 return false;
-            }
-
-            if let Some(duration) = entry_enrichments.get(YOUTUBE_DURATION_KEY) {
-                if let Some(seconds) = parse_iso8601_duration_seconds(duration) {
-                    if seconds <= 61 {
-                        return false;
-                    }
-                }
             }
         }
 
@@ -1409,7 +1631,12 @@ fn safe_truncate(s: &str, max_width: usize) -> String {
     for c in s.chars() {
         let u = c as u32;
         // Strip emojis and variation selectors that cause terminal rendering bugs
-        if (u >= 0x2600 && u <= 0x27BF) || (u >= 0x1F000 && u <= 0x1FAFF) || u == 0xFE0F || u == 0xFE0E || u == 0x200D {
+        if (u >= 0x2600 && u <= 0x27BF)
+            || (u >= 0x1F000 && u <= 0x1FAFF)
+            || u == 0xFE0F
+            || u == 0xFE0E
+            || u == 0x200D
+        {
             continue;
         }
 
@@ -1428,10 +1655,15 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let outer = f.area();
     let main_and_bar = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(outer);
     let main_area = main_and_bar[0];
-    let bar_area = main_and_bar[1];
+    let status_area = main_and_bar[1];
+    let bar_area = main_and_bar[2];
 
     let (list_area, detail_area) = main_sections(main_area);
 
@@ -1453,10 +1685,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                                 .fg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            format!("  ({count})"),
-                            Style::default().fg(Color::DarkGray),
-                        ),
+                        Span::styled(format!("  ({count})"), Style::default().fg(Color::DarkGray)),
                     ]);
                     ListItem::new(line)
                 }
@@ -1473,15 +1702,18 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     } else {
                         Span::raw("  ")
                     };
-                    
+
                     let max_title_width = list_area.width.saturating_sub(8) as usize;
                     let truncated_title = safe_truncate(&entry.title, max_title_width);
 
-                    let line = Line::from(vec![
-                        Span::raw("    "),
-                        star,
-                        Span::styled(truncated_title, title_style),
-                    ]);
+                    let duration_label = entry_duration_label(entry, &app.entry_enrichments);
+                    let title_span = if let Some(d) = duration_label {
+                        Span::styled(format!("{} [{}]", truncated_title, d), title_style)
+                    } else {
+                        Span::styled(truncated_title, title_style)
+                    };
+
+                    let line = Line::from(vec![Span::raw("    "), star, title_span]);
                     ListItem::new(line)
                 }
             })
@@ -1506,17 +1738,25 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 } else {
                     Span::raw("  ")
                 };
-                
+
                 use unicode_width::UnicodeWidthStr;
                 let source_str = format!("{source}  ");
                 let source_width = source_str.width();
-                let max_title_width = list_area.width.saturating_sub(6 + source_width as u16) as usize;
+                let max_title_width =
+                    list_area.width.saturating_sub(6 + source_width as u16) as usize;
                 let truncated_title = safe_truncate(&entry.title, max_title_width);
+
+                let duration_label = entry_duration_label(entry, &app.entry_enrichments);
+                let title_span = if let Some(d) = duration_label {
+                    Span::styled(format!("{} [{}]", truncated_title, d), title_style)
+                } else {
+                    Span::styled(truncated_title, title_style)
+                };
 
                 let line = Line::from(vec![
                     star,
                     Span::styled(source_str, Style::default().fg(Color::Cyan)),
-                    Span::styled(truncated_title, title_style),
+                    title_span,
                 ]);
                 ListItem::new(line)
             })
@@ -1559,9 +1799,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         Span::styled("Detail", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" "),
     ]);
-    let detail_block = Block::default()
-        .borders(Borders::ALL)
-        .title(detail_title);
+    let detail_block = Block::default().borders(Borders::ALL).title(detail_title);
     let detail_inner = detail_block.inner(detail_area);
     f.render_widget(detail_block, detail_area);
 
@@ -1584,10 +1822,8 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     } else if show_thumbnail_area {
         let (thumbnail_area, summary_area) = detail_sections(detail_inner);
         if thumbnail_area.width > 0 && thumbnail_area.height > 0 {
-            let thumbnail_text = build_thumbnail_status_text(
-                app.selected_entry(),
-                app.selected_thumbnail_status(),
-            );
+            let thumbnail_text =
+                build_thumbnail_status_text(app.selected_entry(), app.selected_thumbnail_status());
             if !thumbnail_text.is_empty() {
                 f.render_widget(
                     Paragraph::new(thumbnail_text)
@@ -1616,7 +1852,9 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         );
     }
 
-    let key = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let key = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Color::DarkGray);
     let sep = Span::styled("\u{2502} ", dim);
     let bar = Line::from(vec![
@@ -1654,6 +1892,18 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         Span::styled("q", key),
         Span::styled("uit", dim),
     ]);
+    let status = match &app.status_message {
+        Some(StatusMessage {
+            text,
+            kind: StatusKind::Error,
+        }) => Paragraph::new(text.clone()).style(Style::default().fg(Color::LightRed)),
+        Some(StatusMessage {
+            text,
+            kind: StatusKind::Info,
+        }) => Paragraph::new(text.clone()).style(Style::default().fg(Color::DarkGray)),
+        None => Paragraph::new(String::new()),
+    };
+    f.render_widget(status, status_area);
     f.render_widget(Paragraph::new(bar), bar_area);
 
     match &app.overlay {
@@ -1672,7 +1922,11 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn bool_display(v: bool) -> &'static str {
-    if v { "yes" } else { "no" }
+    if v {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn draw_settings_overlay(f: &mut ratatui::Frame, settings: &SettingsState, area: Rect) {
@@ -1692,12 +1946,30 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, settings: &SettingsState, area:
 
     let fields: Vec<(&str, String)> = vec![
         ("Top N", format!("\u{25c2} {} \u{25b8}", settings.top_n)),
-        ("Ranking", format!("\u{25c2} {} \u{25b8}", settings.ranking_mode)),
-        ("Channel Sort", format!("\u{25c2} {} \u{25b8}", settings.channel_sort)),
-        ("Poll (min)", format!("\u{25c2} {} \u{25b8}", settings.poll_interval)),
-        ("Show Shorts", format!("[{}]", bool_display(settings.show_shorts))),
-        ("Show Live", format!("[{}]", bool_display(settings.show_live))),
-        ("Show Premieres", format!("[{}]", bool_display(settings.show_premieres))),
+        (
+            "Ranking",
+            format!("\u{25c2} {} \u{25b8}", settings.ranking_mode),
+        ),
+        (
+            "Channel Sort",
+            format!("\u{25c2} {} \u{25b8}", settings.channel_sort),
+        ),
+        (
+            "Poll (min)",
+            format!("\u{25c2} {} \u{25b8}", settings.poll_interval),
+        ),
+        (
+            "Show Shorts",
+            format!("[{}]", bool_display(settings.show_shorts)),
+        ),
+        (
+            "Show Live",
+            format!("[{}]", bool_display(settings.show_live)),
+        ),
+        (
+            "Show Premieres",
+            format!("[{}]", bool_display(settings.show_premieres)),
+        ),
         ("View Ignored", "\u{21b2} open".to_string()),
     ];
 
@@ -1714,12 +1986,16 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, settings: &SettingsState, area:
     for (i, (label, value)) in fields.iter().enumerate() {
         let selected = i == settings.selected;
         let label_style = if selected {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         };
         let value_style = if selected {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -1733,14 +2009,8 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, settings: &SettingsState, area:
     }
 
     let dim = Style::default().fg(Color::DarkGray);
-    let hint1 = Line::from(Span::styled(
-        "  j/k move   h/l change   Space toggle",
-        dim,
-    ));
-    let hint2 = Line::from(Span::styled(
-        "  Enter save/open   Esc cancel",
-        dim,
-    ));
+    let hint1 = Line::from(Span::styled("  j/k move   h/l change   Space toggle", dim));
+    let hint2 = Line::from(Span::styled("  Enter save/open   Esc cancel", dim));
     f.render_widget(Paragraph::new(hint1), rows[fields.len() + 1]);
     f.render_widget(Paragraph::new(hint2), rows[fields.len() + 2]);
 }
@@ -1762,14 +2032,20 @@ fn draw_top_n_overlay(f: &mut ratatui::Frame, buf: &str, area: Rect) {
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
         .split(inner);
 
     let input = Line::from(vec![
         Span::styled("  N = ", Style::default().fg(Color::Gray)),
         Span::styled(
             format!("{buf}_"),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
     ]);
     f.render_widget(Paragraph::new(input), rows[0]);
@@ -1793,13 +2069,15 @@ fn draw_channels_manager_overlay(f: &mut ratatui::Frame, state: &ChannelsManager
             Span::raw(" "),
         ]))
         .style(Style::default().bg(Color::Black));
-    
+
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
-    let items: Vec<ListItem> = state.sources.iter().map(|s| {
-        ListItem::new(s.name.clone())
-    }).collect();
+    let items: Vec<ListItem> = state
+        .sources
+        .iter()
+        .map(|s| ListItem::new(s.name.clone()))
+        .collect();
 
     let mut list_state = ListState::default();
     list_state.select(Some(state.selected));
@@ -1815,7 +2093,10 @@ fn draw_channels_manager_overlay(f: &mut ratatui::Frame, state: &ChannelsManager
 
     f.render_stateful_widget(list, sections[0], &mut list_state);
 
-    let help = Span::styled("  a: add  d: delete  esc: close", Style::default().fg(Color::DarkGray));
+    let help = Span::styled(
+        "  a: add  d: delete  esc: close",
+        Style::default().fg(Color::DarkGray),
+    );
     f.render_widget(Paragraph::new(help), sections[1]);
 }
 
@@ -1827,7 +2108,10 @@ fn draw_add_channel_overlay(f: &mut ratatui::Frame, buf: &str, area: Rect) {
         .borders(Borders::ALL)
         .title(Line::from(vec![
             Span::raw(" "),
-            Span::styled("Add Channel URL", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Add Channel URL",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
         ]))
         .style(Style::default().bg(Color::Black));
@@ -1843,13 +2127,15 @@ fn draw_add_channel_overlay(f: &mut ratatui::Frame, buf: &str, area: Rect) {
         Span::styled(" URL: ", Style::default().fg(Color::Gray)),
         Span::styled(
             format!("{buf}_"),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
     ]);
 
     f.render_widget(Paragraph::new(input), rows[0]);
     f.render_widget(
-        Paragraph::new("  Enter: add  Esc: cancel")
+        Paragraph::new("  Enter: add  Esc: cancel  accepts channel/video/feed URLs")
             .style(Style::default().fg(Color::DarkGray)),
         rows[1],
     );
@@ -1872,10 +2158,7 @@ fn detail_sections(inner: Rect) -> (Rect, Rect) {
     (sections[0], sections[1])
 }
 
-fn build_thumbnail_status_text(
-    entry: Option<&Entry>,
-    status: Option<&ThumbnailStatus>,
-) -> String {
+fn build_thumbnail_status_text(entry: Option<&Entry>, status: Option<&ThumbnailStatus>) -> String {
     let Some(_entry) = entry else {
         return String::new();
     };
@@ -2010,10 +2293,7 @@ fn build_channel_detail_lines(app: &App, source_id: i64) -> Vec<Line<'static>> {
             Span::styled("Avg rating  ", label),
             Span::styled(stars_filled, Style::default().fg(Color::Yellow)),
             Span::styled(stars_empty, dim),
-            Span::styled(
-                format!("  {avg:.1}  ({} rated)", stats.rating_n),
-                dim,
-            ),
+            Span::styled(format!("  {avg:.1}  ({} rated)", stats.rating_n), dim),
         ]));
     }
 
@@ -2022,7 +2302,9 @@ fn build_channel_detail_lines(app: &App, source_id: i64) -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled("Latest entry", label)));
         lines.push(Line::from(Span::styled(title, bold_white)));
         lines.push(Line::from(Span::styled(
-            at.with_timezone(&Local).format("%b %d, %Y  %H:%M").to_string(),
+            at.with_timezone(&Local)
+                .format("%b %d, %Y  %H:%M")
+                .to_string(),
             dim,
         )));
     }
@@ -2070,10 +2352,7 @@ fn build_detail_lines(
 
     let mut meta_spans: Vec<Span> = Vec::new();
     if let Some(date) = entry.published_at {
-        meta_spans.push(Span::styled(
-            date.format("%b %d, %Y").to_string(),
-            label,
-        ));
+        meta_spans.push(Span::styled(date.format("%b %d, %Y").to_string(), label));
     }
 
     let views = enrichments
@@ -2089,6 +2368,17 @@ fn build_detail_lines(
         ));
     }
 
+    let duration = enrichments
+        .and_then(|e| e.get(YOUTUBE_DURATION_KEY))
+        .and_then(|raw| parse_iso8601_duration_seconds(raw))
+        .map(format_duration);
+    if let Some(d) = duration {
+        if !meta_spans.is_empty() {
+            meta_spans.push(Span::styled("  \u{00b7}  ", dim));
+        }
+        meta_spans.push(Span::styled(d, label));
+    }
+
     let state_str = match entry.state {
         EntryState::New => "new",
         EntryState::Viewed => "viewed",
@@ -2102,10 +2392,7 @@ fn build_detail_lines(
     if let Some(rating) = entry.rating {
         meta_spans.push(Span::styled("  \u{00b7}  ", dim));
         let stars = "\u{2605}".repeat(rating as usize);
-        meta_spans.push(Span::styled(
-            stars,
-            Style::default().fg(Color::Yellow),
-        ));
+        meta_spans.push(Span::styled(stars, Style::default().fg(Color::Yellow)));
     }
     lines.push(Line::from(meta_spans));
 
@@ -2151,9 +2438,9 @@ fn strip_html(html: &str) -> String {
                     .next()
                     .unwrap_or("");
                 match tag_name {
-                    "br" | "p" | "/p" | "div" | "/div" | "hr" | "/hr" | "tr" | "/tr"
-                    | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "/h1" | "/h2" | "/h3"
-                    | "/h4" | "/h5" | "/h6" => {
+                    "br" | "p" | "/p" | "div" | "/div" | "hr" | "/hr" | "tr" | "/tr" | "h1"
+                    | "h2" | "h3" | "h4" | "h5" | "h6" | "/h1" | "/h2" | "/h3" | "/h4" | "/h5"
+                    | "/h6" => {
                         if !out.ends_with('\n') {
                             out.push('\n');
                         }
@@ -2331,7 +2618,6 @@ fn download_thumbnail(url: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
-
 async fn add_feed(url: &str, override_name: Option<&str>) -> Result<()> {
     let db_path = Storage::default_path().context("resolving database path")?;
     let mut storage = Storage::open(&db_path)
@@ -2357,7 +2643,106 @@ fn youtube_adapter() -> YoutubeAdapter {
     }
 }
 
-async fn fetch_feed_for(kind: AdapterType, url: &str) -> Result<feedfold_core::adapter::FetchedFeed> {
+fn block_on_async<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
+}
+
+fn youtube_feed_url(channel_id: &str) -> String {
+    format!("https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}")
+}
+
+fn extract_channel_id_after(haystack: &str, needle: &str) -> Option<String> {
+    let idx = haystack.find(needle)?;
+    let mut out = String::new();
+    for ch in haystack[idx + needle.len()..].chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            break;
+        }
+    }
+
+    if out.starts_with("UC") {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn extract_channel_id_from_youtube_html(html: &str) -> Option<String> {
+    extract_channel_id_after(html, "https://www.youtube.com/feeds/videos.xml?channel_id=")
+        .or_else(|| extract_channel_id_after(html, "\"channelId\":\""))
+}
+
+fn normalize_direct_youtube_url(url: &str) -> Option<String> {
+    if opml::looks_like_youtube_feed(url) {
+        return Some(url.to_string());
+    }
+
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if !host.contains("youtube.com") && host != "youtu.be" {
+        return None;
+    }
+
+    if let Some(channel_id) = parsed
+        .query_pairs()
+        .find_map(|(key, value)| (key == "channel_id").then(|| value.into_owned()))
+    {
+        return Some(youtube_feed_url(&channel_id));
+    }
+
+    let mut segments = parsed.path_segments()?;
+    let first = segments.next()?;
+    let second = segments.next()?;
+    if first == "channel" && second.starts_with("UC") {
+        return Some(youtube_feed_url(second));
+    }
+
+    None
+}
+
+async fn normalize_source_url(url: &str) -> Result<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("URL is empty");
+    }
+
+    if let Some(normalized) = normalize_direct_youtube_url(trimmed) {
+        return Ok(normalized);
+    }
+
+    let parsed = reqwest::Url::parse(trimmed).context("URL is invalid")?;
+    let host = parsed
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if !host.contains("youtube.com") && host != "youtu.be" {
+        return Ok(trimmed.to_string());
+    }
+
+    let response = reqwest::Client::new()
+        .get(parsed)
+        .send()
+        .await
+        .context("resolving YouTube URL")?
+        .error_for_status()
+        .context("loading YouTube page")?;
+    let html = response.text().await.context("reading YouTube page")?;
+    let channel_id = extract_channel_id_from_youtube_html(&html).ok_or_else(|| {
+        anyhow::anyhow!("could not find a YouTube channel for this URL; use a channel or feed URL")
+    })?;
+
+    Ok(youtube_feed_url(&channel_id))
+}
+
+async fn fetch_feed_for(
+    kind: AdapterType,
+    url: &str,
+) -> Result<feedfold_core::adapter::FetchedFeed> {
     match kind {
         AdapterType::Rss => RssAdapter::new()
             .fetch(url)
@@ -2382,20 +2767,21 @@ async fn add_feed_with_storage(
     url: &str,
     override_name: Option<&str>,
 ) -> Result<ImportOutcome> {
-    let kind = adapter_for_url(url);
-    let fetched = fetch_feed_for(kind, url).await?;
+    let url = normalize_source_url(url).await?;
+    let kind = adapter_for_url(&url);
+    let fetched = fetch_feed_for(kind, &url).await?;
 
     let name = override_name
         .map(str::to_owned)
         .or_else(|| fetched.name.clone())
         .unwrap_or_else(|| url.to_string());
 
-    let (source_id, already_tracked, source_name) = match storage.source_by_url(url)? {
+    let (source_id, already_tracked, source_name) = match storage.source_by_url(&url)? {
         Some(existing) => (existing.id, true, existing.name),
         None => {
             let new = NewSource {
                 name: name.clone(),
-                url: url.to_string(),
+                url: url.clone(),
                 adapter: kind,
                 top_n_override: None,
             };
@@ -2610,6 +2996,40 @@ mod tests {
         }
     }
 
+    fn sample_youtube_source() -> NewSource {
+        NewSource {
+            name: "Example Channel".to_string(),
+            url: "https://www.youtube.com/feeds/videos.xml?channel_id=UC123".to_string(),
+            adapter: AdapterType::Youtube,
+            top_n_override: None,
+        }
+    }
+
+    fn youtube_new_entry(
+        source_id: i64,
+        external_id: &str,
+        title: &str,
+        published_at: &str,
+        duration: &str,
+        embed_width: u64,
+        embed_height: u64,
+    ) -> NewEntry {
+        let mut entry = sample_new_entry(source_id, external_id, title);
+        entry.url = format!("https://www.youtube.com/watch?v={external_id}");
+        entry.published_at = Some(DateTime::parse_from_rfc3339(published_at).unwrap().to_utc());
+        entry
+            .enrichments
+            .insert(YOUTUBE_DURATION_KEY.to_string(), duration.to_string());
+        entry
+            .enrichments
+            .insert(YOUTUBE_EMBED_WIDTH_KEY.to_string(), embed_width.to_string());
+        entry.enrichments.insert(
+            YOUTUBE_EMBED_HEIGHT_KEY.to_string(),
+            embed_height.to_string(),
+        );
+        entry
+    }
+
     #[test]
     fn ready_thumbnail_clears_placeholder_text() {
         let entry = sample_entry();
@@ -2655,6 +3075,181 @@ mod tests {
         let text: String = lines.iter().map(|l| l.to_string() + "\n").collect();
 
         assert!(text.contains("1.2M views"), "got: {text}");
+    }
+
+    #[test]
+    fn probable_youtube_short_uses_legacy_sixty_second_cutoff_before_october_2024() {
+        let mut entry = sample_entry();
+        entry.published_at = Some(Utc.with_ymd_and_hms(2024, 9, 1, 0, 0, 0).single().unwrap());
+
+        let enrichments = HashMap::from([
+            (YOUTUBE_DURATION_KEY.to_string(), "PT59S".to_string()),
+            (YOUTUBE_EMBED_WIDTH_KEY.to_string(), "4608".to_string()),
+            (YOUTUBE_EMBED_HEIGHT_KEY.to_string(), "8192".to_string()),
+        ]);
+        assert!(is_probable_youtube_short(&entry, &enrichments));
+
+        let enrichments = HashMap::from([
+            (YOUTUBE_DURATION_KEY.to_string(), "PT61S".to_string()),
+            (YOUTUBE_EMBED_WIDTH_KEY.to_string(), "4608".to_string()),
+            (YOUTUBE_EMBED_HEIGHT_KEY.to_string(), "8192".to_string()),
+        ]);
+        assert!(!is_probable_youtube_short(&entry, &enrichments));
+    }
+
+    #[test]
+    fn probable_youtube_short_uses_three_minute_cutoff_after_october_2024() {
+        let mut entry = sample_entry();
+        entry.published_at = Some(
+            Utc.with_ymd_and_hms(2024, 10, 16, 0, 0, 0)
+                .single()
+                .unwrap(),
+        );
+
+        let enrichments = HashMap::from([
+            (YOUTUBE_DURATION_KEY.to_string(), "PT3M".to_string()),
+            (YOUTUBE_EMBED_WIDTH_KEY.to_string(), "4608".to_string()),
+            (YOUTUBE_EMBED_HEIGHT_KEY.to_string(), "8192".to_string()),
+        ]);
+        assert!(is_probable_youtube_short(&entry, &enrichments));
+
+        let enrichments = HashMap::from([
+            (YOUTUBE_DURATION_KEY.to_string(), "PT3M1S".to_string()),
+            (YOUTUBE_EMBED_WIDTH_KEY.to_string(), "4608".to_string()),
+            (YOUTUBE_EMBED_HEIGHT_KEY.to_string(), "8192".to_string()),
+        ]);
+        assert!(!is_probable_youtube_short(&entry, &enrichments));
+    }
+
+    #[test]
+    fn probable_youtube_short_falls_back_to_sixty_seconds_when_orientation_is_missing() {
+        let mut entry = sample_entry();
+        entry.published_at = Some(Utc.with_ymd_and_hms(2025, 4, 1, 0, 0, 0).single().unwrap());
+
+        let enrichments = HashMap::from([(YOUTUBE_DURATION_KEY.to_string(), "PT47S".to_string())]);
+        assert!(is_probable_youtube_short(&entry, &enrichments));
+
+        let enrichments =
+            HashMap::from([(YOUTUBE_DURATION_KEY.to_string(), "PT1M15S".to_string())]);
+        assert!(!is_probable_youtube_short(&entry, &enrichments));
+    }
+
+    #[test]
+    fn probable_youtube_short_requires_square_or_vertical_player_without_text_hints() {
+        let mut entry = sample_entry();
+        entry.published_at = Some(Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).single().unwrap());
+        entry.title = "Not labeled as a short".to_string();
+        entry.summary = Some("A regular upload".to_string());
+        entry.url = "https://www.youtube.com/watch?v=abc123".to_string();
+
+        let enrichments = HashMap::from([
+            (YOUTUBE_DURATION_KEY.to_string(), "PT45S".to_string()),
+            (YOUTUBE_EMBED_WIDTH_KEY.to_string(), "8192".to_string()),
+            (YOUTUBE_EMBED_HEIGHT_KEY.to_string(), "4608".to_string()),
+        ]);
+        assert!(!is_probable_youtube_short(&entry, &enrichments));
+    }
+
+    #[test]
+    fn filter_youtube_content_hides_probable_shorts_without_touching_landscape_videos() {
+        let mut storage = Storage::open_in_memory().unwrap();
+        let source_id = storage.insert_source(&sample_youtube_source()).unwrap();
+
+        storage
+            .upsert_entries(&[
+                youtube_new_entry(
+                    source_id,
+                    "short-vertical",
+                    "Vertical short",
+                    "2025-01-01T00:00:00Z",
+                    "PT2M30S",
+                    4608,
+                    8192,
+                ),
+                youtube_new_entry(
+                    source_id,
+                    "landscape-short",
+                    "Landscape clip",
+                    "2025-01-01T00:00:00Z",
+                    "PT45S",
+                    8192,
+                    4608,
+                ),
+            ])
+            .unwrap();
+
+        let mut entries = storage.list_entries_for_source(source_id).unwrap();
+        let mut config = Config::default();
+        config.youtube.show_shorts = false;
+        config.youtube.show_live = true;
+        config.youtube.show_premieres = true;
+
+        filter_youtube_content(&storage, &mut entries, &config).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].external_id, "landscape-short");
+    }
+
+    #[test]
+    fn rebuild_channel_rows_includes_all_sources() {
+        let mut app = App::new(
+            vec![sample_entry()],
+            vec![
+                DbSource {
+                    id: 1,
+                    name: "Example Feed".to_string(),
+                    url: "https://example.com/feed.xml".to_string(),
+                    adapter: AdapterType::Rss,
+                    top_n_override: None,
+                    created_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single().unwrap(),
+                },
+                DbSource {
+                    id: 2,
+                    name: "Branch Education".to_string(),
+                    url: "https://www.youtube.com/feeds/videos.xml?channel_id=UC123".to_string(),
+                    adapter: AdapterType::Youtube,
+                    top_n_override: None,
+                    created_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single().unwrap(),
+                },
+            ],
+            Config::default(),
+            ThumbnailMode::TextFallback,
+            PathBuf::new(),
+        );
+        app.channel_stats.insert(
+            2,
+            ChannelStats {
+                total: 50,
+                new_count: 3,
+                ..Default::default()
+            },
+        );
+
+        app.rebuild_channel_rows();
+
+        assert_eq!(app.channel_rows.len(), 2);
+        assert!(app.channel_rows.iter().any(|row| matches!(
+            row,
+            ChannelRow::Header { name, count, .. }
+                if name == "Branch Education" && *count == 50
+        )));
+    }
+
+    #[test]
+    fn normalize_direct_youtube_url_handles_channel_paths() {
+        assert_eq!(
+            normalize_direct_youtube_url("https://www.youtube.com/channel/UC123abc").as_deref(),
+            Some("https://www.youtube.com/feeds/videos.xml?channel_id=UC123abc")
+        );
+    }
+
+    #[test]
+    fn extract_channel_id_from_youtube_html_finds_feed_links() {
+        let html = r#"<link rel="alternate" type="application/rss+xml" href="https://www.youtube.com/feeds/videos.xml?channel_id=UCabc123_xyz">"#;
+        assert_eq!(
+            extract_channel_id_from_youtube_html(html).as_deref(),
+            Some("UCabc123_xyz")
+        );
     }
 
     #[test]
@@ -2950,7 +3545,9 @@ mod tests {
         refresh_view(&mut app, &storage).unwrap();
 
         assert_eq!(app.entries.len(), 1);
-        assert!(toggle_star_for_selected(&mut app, &mut storage).unwrap().is_some());
+        assert!(toggle_star_for_selected(&mut app, &mut storage)
+            .unwrap()
+            .is_some());
         assert!(app.entries.is_empty());
 
         let updated = storage

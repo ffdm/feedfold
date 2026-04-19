@@ -20,7 +20,9 @@ impl OpmlFeed {
 
 pub fn parse(raw: &str) -> Result<Vec<OpmlFeed>> {
     if !raw.contains("<opml") && !raw.contains("<OPML") {
-        return Err(anyhow!("file does not look like OPML (missing <opml> root)"));
+        return Err(anyhow!(
+            "file does not look like OPML (missing <opml> root)"
+        ));
     }
 
     let mut feeds = Vec::new();
@@ -64,7 +66,9 @@ fn find_next_outline(raw: &str, from: usize) -> Option<usize> {
     let idx = lowered.find("<outline")?;
     let after = haystack.as_bytes().get(idx + "<outline".len()).copied();
     match after {
-        Some(b) if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == b'/' || b == b'>' => {
+        Some(b)
+            if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == b'/' || b == b'>' =>
+        {
             Some(from + idx)
         }
         _ => None,
@@ -77,19 +81,18 @@ fn extract_attr(tag: &str, name: &str) -> Option<String> {
     let mut search_from = 0;
     while let Some(pos) = lowered[search_from..].find(&needle) {
         let abs = search_from + pos;
-        let before_ok = abs == 0
-            || matches!(
-                lowered.as_bytes()[abs - 1],
-                b' ' | b'\t' | b'\n' | b'\r'
-            );
+        let before_ok =
+            abs == 0 || matches!(lowered.as_bytes()[abs - 1], b' ' | b'\t' | b'\n' | b'\r');
         let after = lowered.as_bytes().get(abs + needle.len()).copied();
-        if before_ok && matches!(after, Some(b'=') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')) {
+        if before_ok
+            && matches!(
+                after,
+                Some(b'=') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+            )
+        {
             let mut cursor = abs + needle.len();
             while cursor < lowered.len()
-                && matches!(
-                    lowered.as_bytes()[cursor],
-                    b' ' | b'\t' | b'\n' | b'\r'
-                )
+                && matches!(lowered.as_bytes()[cursor], b' ' | b'\t' | b'\n' | b'\r')
             {
                 cursor += 1;
             }
@@ -99,10 +102,7 @@ fn extract_attr(tag: &str, name: &str) -> Option<String> {
             }
             cursor += 1;
             while cursor < lowered.len()
-                && matches!(
-                    lowered.as_bytes()[cursor],
-                    b' ' | b'\t' | b'\n' | b'\r'
-                )
+                && matches!(lowered.as_bytes()[cursor], b' ' | b'\t' | b'\n' | b'\r')
             {
                 cursor += 1;
             }

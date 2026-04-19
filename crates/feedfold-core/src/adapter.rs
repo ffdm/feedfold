@@ -59,10 +59,7 @@ pub enum AdapterError {
 pub trait SourceAdapter: Send + Sync {
     fn kind(&self) -> AdapterType;
 
-    fn fetch(
-        &self,
-        url: &str,
-    ) -> impl Future<Output = Result<FetchedFeed, AdapterError>> + Send;
+    fn fetch(&self, url: &str) -> impl Future<Output = Result<FetchedFeed, AdapterError>> + Send;
 }
 
 #[cfg(test)]

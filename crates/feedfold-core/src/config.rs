@@ -377,10 +377,7 @@ adapter = "rss"
 api_key = "AIzaTestKey123"
 "#;
         let config = Config::parse(raw).expect("parses");
-        assert_eq!(
-            config.youtube.api_key.as_deref(),
-            Some("AIzaTestKey123")
-        );
+        assert_eq!(config.youtube.api_key.as_deref(), Some("AIzaTestKey123"));
     }
 
     #[test]

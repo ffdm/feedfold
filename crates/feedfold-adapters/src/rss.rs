@@ -49,8 +49,7 @@ impl SourceAdapter for RssAdapter {
             .await
             .map_err(|e| AdapterError::Fetch(Box::new(e)))?;
 
-        let feed =
-            parser::parse(bytes.as_ref()).map_err(|e| AdapterError::Parse(Box::new(e)))?;
+        let feed = parser::parse(bytes.as_ref()).map_err(|e| AdapterError::Parse(Box::new(e)))?;
 
         let name = feed.title.as_ref().map(|t| t.content.clone());
 

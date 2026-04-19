@@ -67,7 +67,14 @@ async fn main() -> Result<()> {
         .map(YoutubeAdapter::with_api_key)
         .unwrap_or_default();
     let rankers = RuntimeRankers::from_env(&config);
-    poll_all(&mut storage, &rss_adapter, &youtube_adapter, &rankers, &config).await;
+    poll_all(
+        &mut storage,
+        &rss_adapter,
+        &youtube_adapter,
+        &rankers,
+        &config,
+    )
+    .await;
 
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await;
@@ -212,13 +219,15 @@ async fn rank_entries(
     match mode {
         RankingMode::Recency => RecencyRanker.rank(entries, &ctx),
         RankingMode::Popularity => PopularityRanker.rank(entries, &ctx),
-        RankingMode::Claude => match rank_entries_with_claude(storage, entries, top_n, claude_ranker).await {
-            Ok(scores) => scores,
-            Err(e) => {
-                warn!("{source_name}: Claude ranking unavailable, using recency: {e}");
-                RecencyRanker.rank(entries, &ctx)
+        RankingMode::Claude => {
+            match rank_entries_with_claude(storage, entries, top_n, claude_ranker).await {
+                Ok(scores) => scores,
+                Err(e) => {
+                    warn!("{source_name}: Claude ranking unavailable, using recency: {e}");
+                    RecencyRanker.rank(entries, &ctx)
+                }
             }
-        },
+        }
     }
 }
 
@@ -294,8 +303,14 @@ ranking = "popularity"
     #[tokio::test]
     async fn rank_entries_uses_claude_when_configured() {
         let (storage, entries) = sample_storage_with_entries();
-        let older_entry = entries.iter().find(|entry| entry.external_id == "old").unwrap();
-        let newer_entry = entries.iter().find(|entry| entry.external_id == "new").unwrap();
+        let older_entry = entries
+            .iter()
+            .find(|entry| entry.external_id == "old")
+            .unwrap();
+        let newer_entry = entries
+            .iter()
+            .find(|entry| entry.external_id == "new")
+            .unwrap();
         let response_body = format!(
             "{{\"content\":[{{\"type\":\"text\",\"text\":\"{{\\\"ranked_entry_ids\\\":[{},{}]}}\"}}]}}",
             older_entry.id, newer_entry.id
@@ -320,7 +335,10 @@ ranking = "popularity"
     #[tokio::test]
     async fn rank_entries_falls_back_to_recency_when_claude_is_unavailable() {
         let (storage, entries) = sample_storage_with_entries();
-        let newer_entry = entries.iter().find(|entry| entry.external_id == "new").unwrap();
+        let newer_entry = entries
+            .iter()
+            .find(|entry| entry.external_id == "new")
+            .unwrap();
 
         let scores = rank_entries(
             &storage,
