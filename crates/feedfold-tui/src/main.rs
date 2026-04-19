@@ -200,6 +200,12 @@ struct ThumbnailDownload {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(path) = Config::bootstrap_if_missing().context("bootstrapping config")? {
+        eprintln!(
+            "Created config at {}. Edit it to set feeds, polling, and API keys.",
+            path.display()
+        );
+    }
     match cli.command {
         Some(Command::Add { url, name }) => add_feed(&url, name.as_deref()).await,
         Some(Command::Import { path }) => import_opml(&path).await,

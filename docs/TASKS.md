@@ -55,7 +55,7 @@ Last updated: 2026-04-17
 - [x] 5.2 `feedfold list` source inspector
 - [x] 5.3 `feedfold remove <id|url>` source removal
 - [x] 5.4 `feedfold export` OPML export for backup
-- [~] 5.5 First-run config bootstrap
+- [x] 5.5 First-run config bootstrap
 
 ## Phase 6: Persistent daemon
 

@@ -5,6 +5,8 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+const EXAMPLE_CONFIG: &str = include_str!("../../../config.example.toml");
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
@@ -220,6 +222,10 @@ pub enum ConfigError {
 }
 
 impl Config {
+    pub fn example_template() -> &'static str {
+        EXAMPLE_CONFIG
+    }
+
     pub fn default_path() -> Result<PathBuf, ConfigError> {
         let dirs = ProjectDirs::from("", "", "feedfold").ok_or(ConfigError::NoConfigDir)?;
         Ok(dirs.config_dir().join("config.toml"))
@@ -248,6 +254,15 @@ impl Config {
         Self::load_from(Self::default_path()?)
     }
 
+    pub fn bootstrap_if_missing() -> Result<Option<PathBuf>, ConfigError> {
+        let path = Self::default_path()?;
+        if Self::write_example_to(&path)? {
+            Ok(Some(path))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn save(&self) -> Result<(), ConfigError> {
         self.save_to(Self::default_path()?)
     }
@@ -268,6 +283,26 @@ impl Config {
         Ok(())
     }
 
+    fn write_example_to(path: &Path) -> Result<bool, ConfigError> {
+        if path.exists() {
+            return Ok(false);
+        }
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        }
+
+        fs::write(path, Self::example_template()).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+        Ok(true)
+    }
+
     pub fn youtube_api_key(&self) -> Option<String> {
         self.youtube
             .api_key
@@ -281,6 +316,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     const SAMPLE: &str = r#"
 [general]
@@ -384,5 +420,53 @@ api_key = "AIzaTestKey123"
     fn youtube_api_key_defaults_to_none() {
         let config = Config::parse("").expect("parses");
         assert_eq!(config.youtube.api_key, None);
+    }
+
+    #[test]
+    fn bundled_example_config_parses() {
+        let config = Config::parse(Config::example_template()).expect("example parses");
+        assert_eq!(config.general.default_top_n, 3);
+        assert_eq!(config.ranking.mode, RankingMode::Recency);
+        assert_eq!(config.sources.len(), 2);
+    }
+
+    #[test]
+    fn bootstrap_writes_example_when_config_is_missing() {
+        let path = unique_test_path("config.toml");
+        let written = Config::write_example_to(&path).expect("bootstrap succeeds");
+        let raw = fs::read_to_string(&path).expect("config written");
+
+        assert!(written);
+        assert_eq!(raw, Config::example_template());
+
+        let _ = fs::remove_dir_all(path.parent().expect("config has parent"));
+    }
+
+    #[test]
+    fn bootstrap_does_not_overwrite_existing_config() {
+        let path = unique_test_path("config.toml");
+        fs::create_dir_all(path.parent().expect("config has parent")).expect("parent dir created");
+        fs::write(&path, "[general]\ndefault_top_n = 99\n").expect("config seeded");
+
+        let written = Config::write_example_to(&path).expect("bootstrap succeeds");
+        let raw = fs::read_to_string(&path).expect("config still readable");
+
+        assert!(!written);
+        assert_eq!(raw, "[general]\ndefault_top_n = 99\n");
+
+        let _ = fs::remove_dir_all(path.parent().expect("config has parent"));
+    }
+
+    fn unique_test_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!(
+                "feedfold-config-test-{}-{nanos}",
+                std::process::id()
+            ))
+            .join(name)
     }
 }

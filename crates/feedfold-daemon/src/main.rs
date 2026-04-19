@@ -37,6 +37,13 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    if let Some(path) = Config::bootstrap_if_missing().context("bootstrapping config")? {
+        info!(
+            "Created config at {}. Edit it to set feeds, polling, and API keys.",
+            path.display()
+        );
+    }
+
     let config = match Config::load() {
         Ok(c) => c,
         Err(feedfold_core::config::ConfigError::NotFound(path)) => {
