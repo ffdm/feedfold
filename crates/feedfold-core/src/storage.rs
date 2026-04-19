@@ -549,7 +549,7 @@ impl Storage {
                 s.rating_n += 1;
             }
             if let Some(at) = published_at {
-                if s.latest_published.map_or(true, |cur| at > cur) {
+                if s.latest_published.is_none_or(|cur| at > cur) {
                     s.latest_published = Some(at);
                     s.latest_title = Some(title);
                 }

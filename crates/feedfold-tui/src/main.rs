@@ -65,6 +65,8 @@ enum Command {
         /// Path to an OPML file exported from another reader.
         path: PathBuf,
     },
+    /// Export tracked sources as OPML to stdout.
+    Export,
     /// List every source currently tracked in the database.
     List,
     /// Remove a source by its numeric id or its URL.
@@ -201,6 +203,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Add { url, name }) => add_feed(&url, name.as_deref()).await,
         Some(Command::Import { path }) => import_opml(&path).await,
+        Some(Command::Export) => export_opml(),
         Some(Command::List) => list_sources(),
         Some(Command::Remove { id_or_url, yes }) => remove_source(&id_or_url, yes),
         None => run_tui().await,
@@ -1602,10 +1605,8 @@ fn filter_youtube_content(
             return true;
         };
 
-        if !config.youtube.show_shorts {
-            if is_probable_youtube_short(entry, entry_enrichments) {
-                return false;
-            }
+        if !config.youtube.show_shorts && is_probable_youtube_short(entry, entry_enrichments) {
+            return false;
         }
 
         if let Some(broadcast) = entry_enrichments.get(YOUTUBE_LIVE_BROADCAST_KEY) {
@@ -1631,8 +1632,8 @@ fn safe_truncate(s: &str, max_width: usize) -> String {
     for c in s.chars() {
         let u = c as u32;
         // Strip emojis and variation selectors that cause terminal rendering bugs
-        if (u >= 0x2600 && u <= 0x27BF)
-            || (u >= 0x1F000 && u <= 0x1FAFF)
+        if (0x2600..=0x27BF).contains(&u)
+            || (0x1F000..=0x1FAFF).contains(&u)
             || u == 0xFE0F
             || u == 0xFE0E
             || u == 0x200D
@@ -2197,21 +2198,21 @@ fn format_compact_count(n: u64) -> String {
         n.to_string()
     } else if n < 1_000_000 {
         let tenths = n / 100;
-        if tenths % 10 == 0 || tenths >= 100 {
+        if tenths.is_multiple_of(10) || tenths >= 100 {
             format!("{}K", tenths / 10)
         } else {
             format!("{}.{}K", tenths / 10, tenths % 10)
         }
     } else if n < 1_000_000_000 {
         let tenths = n / 100_000;
-        if tenths % 10 == 0 || tenths >= 100 {
+        if tenths.is_multiple_of(10) || tenths >= 100 {
             format!("{}M", tenths / 10)
         } else {
             format!("{}.{}M", tenths / 10, tenths % 10)
         }
     } else {
         let tenths = n / 100_000_000;
-        if tenths % 10 == 0 {
+        if tenths.is_multiple_of(10) {
             format!("{}B", tenths / 10)
         } else {
             format!("{}.{}B", tenths / 10, tenths % 10)
@@ -2862,6 +2863,23 @@ async fn import_opml(path: &Path) -> Result<()> {
         "Import complete: {added} added, {refreshed} refreshed, {failed} failed out of {}.",
         feeds.len()
     );
+    Ok(())
+}
+
+fn export_opml() -> Result<()> {
+    let db_path = Storage::default_path().context("resolving database path")?;
+    let storage = Storage::open(&db_path)
+        .with_context(|| format!("opening database at {}", db_path.display()))?;
+    let sources = storage.list_sources().context("listing sources")?;
+    let feeds = sources
+        .into_iter()
+        .map(|source| opml::OpmlFeed {
+            url: source.url,
+            title: Some(source.name),
+        })
+        .collect::<Vec<_>>();
+
+    print!("{}", opml::render(&feeds));
     Ok(())
 }
 

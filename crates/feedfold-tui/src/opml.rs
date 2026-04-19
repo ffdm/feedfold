@@ -56,6 +56,30 @@ pub fn parse(raw: &str) -> Result<Vec<OpmlFeed>> {
     Ok(feeds)
 }
 
+pub fn render(feeds: &[OpmlFeed]) -> String {
+    let mut out = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+<head>
+<title>feedfold export</title>
+</head>
+<body>
+"#,
+    );
+
+    for feed in feeds {
+        let title = escape_attr(feed.display_name());
+        let url = escape_attr(&feed.url);
+        out.push_str(&format!(
+            r#"<outline text="{title}" title="{title}" type="rss" xmlUrl="{url}" />
+"#
+        ));
+    }
+
+    out.push_str("</body>\n</opml>\n");
+    out
+}
+
 pub fn looks_like_youtube_feed(url: &str) -> bool {
     url.contains("youtube.com/feeds/videos.xml")
 }
@@ -127,6 +151,15 @@ fn decode_entities(input: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
+}
+
+fn escape_attr(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn deduplicate(feeds: &mut Vec<OpmlFeed>) {
@@ -222,5 +255,36 @@ mod tests {
             "https://www.youtube.com/feeds/videos.xml?channel_id=UC123"
         ));
         assert!(!looks_like_youtube_feed("https://example.com/rss"));
+    }
+
+    #[test]
+    fn renders_valid_opml_that_round_trips_through_parser() {
+        let feeds = vec![
+            OpmlFeed {
+                url: "https://example.com/feed?x=1&y=2".to_string(),
+                title: Some("Fish & Chips".to_string()),
+            },
+            OpmlFeed {
+                url: "https://www.youtube.com/feeds/videos.xml?channel_id=UC123".to_string(),
+                title: Some(r#"Quotes "and" apostrophes'"#.to_string()),
+            },
+        ];
+
+        let rendered = render(&feeds);
+        let reparsed = parse(&rendered).expect("reparse exported OPML");
+
+        assert!(rendered.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+        assert_eq!(reparsed, feeds);
+    }
+
+    #[test]
+    fn renders_empty_export_with_valid_root_elements() {
+        let rendered = render(&[]);
+
+        assert!(rendered.contains("<opml version=\"2.0\">"));
+        assert!(rendered.contains("<body>"));
+        assert!(rendered.contains("</body>"));
+        assert!(rendered.contains("</opml>"));
+        assert!(parse(&rendered).unwrap().is_empty());
     }
 }

@@ -54,7 +54,7 @@ Last updated: 2026-04-17
 - [x] 5.1 `feedfold import <opml>` bulk subscription import
 - [x] 5.2 `feedfold list` source inspector
 - [x] 5.3 `feedfold remove <id|url>` source removal
-- [~] 5.4 `feedfold export` OPML export for backup
+- [x] 5.4 `feedfold export` OPML export for backup
 - [ ] 5.5 First-run config bootstrap
 
 ## Phase 6: Persistent daemon
