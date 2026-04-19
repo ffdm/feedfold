@@ -17,6 +17,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use directories::BaseDirs;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -42,6 +43,7 @@ mod opml;
 
 const THUMBNAIL_HEIGHT: u16 = 12;
 const YOUTUBE_SHORTS_2024_EXPANSION_AT: &str = "2024-10-15T00:00:00Z";
+const LAUNCHD_LABEL: &str = "com.feedfold.feedfoldd";
 
 #[derive(Debug, Parser)]
 #[command(name = "feedfold", version = VERSION, about = "Terminal RSS reader")]
@@ -77,6 +79,17 @@ enum Command {
         #[arg(short = 'y', long)]
         yes: bool,
     },
+    /// Manage the background daemon on macOS.
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    /// Install a launchd agent plist for feedfoldd.
+    Install,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,8 +225,106 @@ async fn main() -> Result<()> {
         Some(Command::Export) => export_opml(),
         Some(Command::List) => list_sources(),
         Some(Command::Remove { id_or_url, yes }) => remove_source(&id_or_url, yes),
+        Some(Command::Daemon { command }) => match command {
+            DaemonCommand::Install => install_daemon(),
+        },
         None => run_tui().await,
     }
+}
+
+fn install_daemon() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        anyhow::bail!("`feedfold daemon install` is only supported on macOS");
+    }
+
+    let home_dir = home_dir()?;
+    let plist_path = launch_agent_path(&home_dir);
+    let daemon_path =
+        daemon_binary_path(&std::env::current_exe().context("resolving current executable")?)?;
+    if !daemon_path.exists() {
+        anyhow::bail!(
+            "feedfoldd was not found next to feedfold at {}",
+            daemon_path.display()
+        );
+    }
+
+    let working_dir = daemon_path
+        .parent()
+        .context("daemon executable has no parent directory")?;
+    let plist = render_launchd_plist(&daemon_path, working_dir);
+    let status = match fs::read_to_string(&plist_path) {
+        Ok(existing) if existing == plist => "Launchd agent already up to date at",
+        _ => {
+            if let Some(parent) = plist_path.parent() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("creating launch agent directory {}", parent.display())
+                })?;
+            }
+            fs::write(&plist_path, plist).with_context(|| {
+                format!("writing launch agent plist at {}", plist_path.display())
+            })?;
+            "Installed launchd agent at"
+        }
+    };
+
+    println!("{status} {}", plist_path.display());
+    Ok(())
+}
+
+fn home_dir() -> Result<PathBuf> {
+    BaseDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .context("resolving home directory")
+}
+
+fn launch_agent_path(home_dir: &Path) -> PathBuf {
+    home_dir
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{LAUNCHD_LABEL}.plist"))
+}
+
+fn daemon_binary_path(current_exe: &Path) -> Result<PathBuf> {
+    let exe_dir = current_exe
+        .parent()
+        .context("current executable has no parent directory")?;
+    Ok(exe_dir.join(format!("feedfoldd{}", std::env::consts::EXE_SUFFIX)))
+}
+
+fn render_launchd_plist(daemon_path: &Path, working_dir: &Path) -> String {
+    let daemon = escape_xml_path(daemon_path);
+    let workdir = escape_xml_path(working_dir);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{daemon}</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{workdir}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+"#
+    )
+}
+
+fn escape_xml_path(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 async fn run_tui() -> Result<()> {
@@ -3581,5 +3692,40 @@ mod tests {
             .find(|item| item.id == entry.id)
             .unwrap();
         assert_eq!(updated.state, EntryState::Starred);
+    }
+
+    #[test]
+    fn launch_agent_path_uses_home_library_launchagents() {
+        let home = Path::new("/Users/alice");
+
+        let path = launch_agent_path(home);
+
+        assert_eq!(
+            path,
+            PathBuf::from("/Users/alice/Library/LaunchAgents/com.feedfold.feedfoldd.plist")
+        );
+    }
+
+    #[test]
+    fn daemon_binary_path_uses_feedfold_sibling_directory() {
+        let current_exe = Path::new("/opt/feedfold/bin/feedfold");
+
+        let path = daemon_binary_path(current_exe).unwrap();
+
+        assert_eq!(path, PathBuf::from("/opt/feedfold/bin/feedfoldd"));
+    }
+
+    #[test]
+    fn render_launchd_plist_embeds_escaped_paths() {
+        let daemon = Path::new("/tmp/feed & fold/bin/feedfoldd");
+        let workdir = Path::new("/tmp/feed <fold>/bin");
+
+        let plist = render_launchd_plist(daemon, workdir);
+
+        assert!(plist.contains("<string>com.feedfold.feedfoldd</string>"));
+        assert!(plist.contains("/tmp/feed &amp; fold/bin/feedfoldd"));
+        assert!(plist.contains("/tmp/feed &lt;fold&gt;/bin"));
+        assert!(plist.contains("<key>RunAtLoad</key>"));
+        assert!(plist.contains("<key>KeepAlive</key>"));
     }
 }

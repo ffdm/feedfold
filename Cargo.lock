@@ -883,6 +883,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm 0.29.0",
+ "directories",
  "feedfold-adapters",
  "feedfold-core",
  "open",
