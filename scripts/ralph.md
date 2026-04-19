@@ -36,7 +36,7 @@ only (never the "Bucket list" section).
 - Otherwise, pick the first task marked `[ ]` (not started) under the
   earliest unfinished phase. Prerequisites matter: don't start 1.3
   before 1.2 is `[x]`.
-- If every task in Phases 0-4 is `[x]`, print
+- If every task in Phases 0-6 is `[x]`, print
   `[ralph] all phases complete` and exit 0. Do nothing else.
 
 Call the selected task `X.Y` for the rest of this prompt.
@@ -129,7 +129,7 @@ git push
 
 ### 3.6 Exit
 
-Print a terse (≤6 line) summary of what shipped and what's next. Do
+Print a (≤15 line) summary of what shipped and what's next. Do
 not offer to continue. The Ralph loop will invoke you again.
 
 ## 4. Invariants that are easy to forget
