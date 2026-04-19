@@ -240,9 +240,13 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn default_path() -> Result<PathBuf, StorageError> {
+    pub fn data_dir() -> Result<PathBuf, StorageError> {
         let dirs = ProjectDirs::from("", "", "feedfold").ok_or(StorageError::NoDataDir)?;
-        Ok(dirs.data_dir().join("feedfold.db"))
+        Ok(dirs.data_dir().to_path_buf())
+    }
+
+    pub fn default_path() -> Result<PathBuf, StorageError> {
+        Ok(Self::data_dir()?.join("feedfold.db"))
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {

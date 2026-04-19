@@ -220,6 +220,12 @@ struct StatusMessage {
     kind: StatusKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonStatus {
+    pid: u32,
+    started_at: DateTime<Local>,
+}
+
 #[derive(Debug)]
 struct ThumbnailDownload {
     url: String,
@@ -563,6 +569,77 @@ fn print_started_daemon_status(status: &LaunchctlServiceStatus) {
     }
 }
 
+fn daemon_pid_path() -> Result<PathBuf> {
+    Ok(Storage::data_dir()
+        .context("resolving daemon data directory")?
+        .join("feedfoldd.pid"))
+}
+
+fn daemon_status_text() -> String {
+    match daemon_pid_path().and_then(|path| read_daemon_status(&path)) {
+        Ok(Some(status)) => format_daemon_status(&status),
+        Ok(None) => "daemon stopped".to_string(),
+        Err(_) => "daemon status unavailable".to_string(),
+    }
+}
+
+fn read_daemon_status(pid_path: &Path) -> Result<Option<DaemonStatus>> {
+    let raw = match fs::read_to_string(pid_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("reading daemon pid file at {}", pid_path.display()));
+        }
+    };
+
+    let pid = raw
+        .trim()
+        .parse()
+        .with_context(|| format!("parsing daemon pid file at {}", pid_path.display()))?;
+    if !process_is_running(pid)? {
+        return Ok(None);
+    }
+
+    let metadata = fs::metadata(pid_path)
+        .with_context(|| format!("reading daemon pid metadata at {}", pid_path.display()))?;
+    let started_at = metadata
+        .created()
+        .or_else(|_| metadata.modified())
+        .with_context(|| format!("reading daemon pid timestamp at {}", pid_path.display()))?;
+
+    Ok(Some(DaemonStatus {
+        pid,
+        started_at: DateTime::<Local>::from(started_at),
+    }))
+}
+
+fn process_is_running(pid: u32) -> Result<bool> {
+    let output = ProcessCommand::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .output()
+        .with_context(|| format!("running `kill -0 {pid}`"))?;
+
+    Ok(output.status.success())
+}
+
+fn format_daemon_status(status: &DaemonStatus) -> String {
+    format!(
+        "daemon up since {} (pid {})",
+        format_daemon_started_at(status.started_at),
+        status.pid
+    )
+}
+
+fn format_daemon_started_at(started_at: DateTime<Local>) -> String {
+    if started_at.date_naive() == Local::now().date_naive() {
+        started_at.format("%H:%M").to_string()
+    } else {
+        started_at.format("%b %d %H:%M").to_string()
+    }
+}
+
 fn render_launchd_plist(daemon_path: &Path, working_dir: &Path) -> String {
     let daemon = escape_xml_path(daemon_path);
     let workdir = escape_xml_path(working_dir);
@@ -627,6 +704,7 @@ async fn run_tui() -> Result<()> {
         thumbnail_dir,
     );
     app.last_poll_at = last_poll_at;
+    app.daemon_status_text = daemon_status_text();
     if let Err(error) = trigger_refresh(&mut app, &mut storage) {
         app.set_error(format!("Refresh failed: {error:#}"));
     }
@@ -722,6 +800,7 @@ struct App {
     thumbnail_rx: Receiver<ThumbnailDownload>,
     undo_stack: Vec<UndoAction>,
     status_message: Option<StatusMessage>,
+    daemon_status_text: String,
 }
 
 impl App {
@@ -764,6 +843,7 @@ impl App {
             thumbnail_rx,
             undo_stack: Vec::new(),
             status_message: None,
+            daemon_status_text: String::new(),
         }
     }
 
@@ -1875,6 +1955,7 @@ fn refresh_view(app: &mut App, storage: &Storage) -> Result<()> {
     app.entry_enrichments = storage.get_enrichments_for_entries(&ids)?;
     app.replace_entries(entries);
     app.last_poll_at = storage.last_poll_at().ok().flatten();
+    app.daemon_status_text = daemon_status_text();
     if app.active_view == ActiveView::Viewed {
         app.viewed_today_count = storage.count_entries_viewed_today()?;
     }
@@ -2291,7 +2372,8 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             text,
             kind: StatusKind::Info,
         }) => Paragraph::new(text.clone()).style(Style::default().fg(Color::DarkGray)),
-        None => Paragraph::new(String::new()),
+        None => Paragraph::new(app.daemon_status_text.clone())
+            .style(Style::default().fg(Color::DarkGray)),
     };
     f.render_widget(status, status_area);
     f.render_widget(Paragraph::new(bar), bar_area);
@@ -3346,6 +3428,8 @@ fn remove_source(id_or_url: &str, skip_confirm: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use chrono::{TimeZone, Utc};
 
     use super::*;
@@ -4047,5 +4131,36 @@ mod tests {
     #[test]
     fn parse_launchctl_pid_accepts_plain_pid_output() {
         assert_eq!(parse_launchctl_pid("4242\n"), Some(4242));
+    }
+
+    #[test]
+    fn read_daemon_status_returns_none_for_missing_pid_file() {
+        let temp_dir = unique_test_dir("daemon-status-missing");
+        let pid_path = temp_dir.join("feedfoldd.pid");
+
+        assert!(read_daemon_status(&pid_path).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_daemon_status_accepts_current_process_pid() {
+        let temp_dir = unique_test_dir("daemon-status-running");
+        fs::create_dir_all(&temp_dir).unwrap();
+        let pid_path = temp_dir.join("feedfoldd.pid");
+        fs::write(&pid_path, format!("{}\n", std::process::id())).unwrap();
+
+        let status = read_daemon_status(&pid_path).unwrap().unwrap();
+
+        assert_eq!(status.pid, std::process::id());
+        assert!(format_daemon_status(&status).contains("daemon up since"));
+
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("feedfold-{label}-{}-{nanos}", std::process::id()))
     }
 }
