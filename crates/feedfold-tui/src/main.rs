@@ -1365,7 +1365,13 @@ fn run_app(
         }
 
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+            let event = event::read()?;
+            if matches!(event, Event::Resize(_, _)) {
+                needs_redraw = true;
+                continue;
+            }
+
+            if let Event::Key(key) = event {
                 if app.is_search_editing() {
                     match key.code {
                         KeyCode::Esc | KeyCode::Enter => {
