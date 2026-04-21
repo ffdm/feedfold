@@ -1,12 +1,22 @@
 # Tasks
 
-Live tracker of what's done, in progress, and next. When you start a task,
-change `[ ]` to `[~]` and commit. When you finish, change it to `[x]` and
-commit again.
+This is the live implementation tracker for feedfold.
+
+The README explains why someone would want the product. This file is narrower:
+what has shipped, what is in flight, and what still needs to land for the next
+step up in usefulness.
 
 Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
-Last updated: 2026-04-17
+Last updated: 2026-04-21
+
+## What is already true
+
+- feedfold is usable end to end right now.
+- The core reading loop, source management, ranking, and macOS daemon flow are
+  all shipped.
+- The next meaningful work is about deeper integrations and better shaping of
+  large subscription sets, not basic viability.
 
 ## Phase 0: Foundations
 
@@ -29,16 +39,16 @@ Last updated: 2026-04-17
 ## Phase 2: YouTube and thumbnails
 
 - [x] 2.1 `YoutubeAdapter` wrapping `RssAdapter`
-- [x] 2.2 YouTube Data API v3 enrichment (batched `videos.list`)
+- [x] 2.2 YouTube Data API v3 enrichment
 - [x] 2.3 `PopularityRanker` using enrichments
 - [x] 2.4 Kitty-protocol thumbnails via `viuer` with text fallback
 - [x] 2.5 Per-source ranking mode override in config
 
 ## Phase 3: Ratings, overflow, and search
 
-- [x] 3.1 1–5 star rating keybind and storage
-- [x] 3.2 "Viewed" view with today's counter
-- [x] 3.3 "Overflow" view for unviewed non-top-N entries
+- [x] 3.1 1-5 star rating keybind and storage
+- [x] 3.2 Viewed view with today's counter
+- [x] 3.3 Overflow view for unviewed non-top-N entries
 - [x] 3.4 Starring
 - [x] 3.5 SQLite FTS5 search over title and summary
 
@@ -61,7 +71,8 @@ Last updated: 2026-04-17
 
 - [x] 6.1 `feedfold daemon install` writing a `launchd` plist
 - [x] 6.2 `feedfold daemon status/start/stop` wrappers
-- [x] 6.3 Pid file and log rotation
+- [x] 6.3 PID file and log rotation
+- [x] 6.4 Auto-start persistent daemon when opening the TUI on macOS
 
 ## Phase 7: Deeper integrations
 
@@ -69,3 +80,14 @@ Last updated: 2026-04-17
 - [ ] 7.2 Source groups and saved filters
 - [ ] 7.3 Local-model (Ollama) ranker
 - [ ] 7.4 Semantic search
+
+## Near-term focus
+
+If you are choosing what to build next, the highest-leverage items are:
+
+- 7.1, because it removes one of the biggest onboarding hurdles for
+  YouTube-heavy users
+- 7.2, because larger source sets become much more useful once the user can
+  shape them intentionally
+- 7.3, because local ranking broadens the product for users who do not want a
+  hosted AI dependency

@@ -1,130 +1,147 @@
 # Roadmap
 
-Phases build on each other. Each phase should produce a working binary you
-can actually use, not half-implemented scaffolding.
+feedfold is already usable today. The roadmap is about making it sharper,
+smarter, and easier to adopt without losing the core promise: your
+subscriptions should feel curated, not punishing.
 
-## Current state (2026-04-15)
+This file serves two jobs:
 
-Phases 0 through 4 are complete. The workspace currently ships:
+- It shows what the product already delivers.
+- It records the order in which major capabilities landed.
 
-- `feedfold` TUI binary with home / viewed / overflow views, read-unread
-  state, star ratings, starring, FTS5 search, and kitty-protocol
-  thumbnails (with a graceful text fallback).
-- `feedfold add <url>` for single-feed import, plus `feedfold import
-  <opml>` for bulk import from any OPML-exporting reader, plus
-  `feedfold list` for inspecting what is tracked.
-- `feedfoldd` background daemon polling all tracked sources on a
-  configurable schedule, applying recency, popularity, or Claude ranking
-  per source, with runtime fallback to recency if Claude is unavailable.
-- YouTube feeds as a first-class adapter, enriched via the YouTube Data
-  API v3 for popularity ranking.
-- `ClaudeRanker` using interests from config and recent rating history
-  as context.
+## Current state (2026-04-21)
 
-The sections below still describe each historic phase so the roadmap
-doubles as a changelog. Completed phases are kept for context.
+Phases 0 through 6 are complete. Today, feedfold gives you:
+
+- A terminal UI with Home, Channels, Viewed, and Overflow views.
+- Per-source top-N ranking, so each source earns a limited amount of attention.
+- Ratings, starring, ignore/viewed state, and search.
+- RSS, Atom, and YouTube feeds in one reader.
+- YouTube enrichment for duration, views, thumbnails, and smarter ranking.
+- OPML import and export, source listing and removal, and first-run config
+  bootstrap.
+- A background daemon on macOS that starts automatically when you open the TUI.
+- Optional Claude ranking that uses your interests and rating history.
+
+The product is no longer a prototype. The remaining roadmap is mostly about
+deeper integrations, more import paths, and more ways to shape the stream.
+
+## Product direction
+
+feedfold is not trying to become a giant "read everything" client. The goal is
+the opposite: help you keep a broad set of subscriptions without turning them
+into a second inbox.
+
+That means future work is judged by a simple standard:
+
+- Does this reduce noise?
+- Does this speed up decisions?
+- Does this make coming back after a few days feel better, not worse?
 
 ## Phase 0: Foundations (done)
 
-Prove the data path end-to-end with the smallest possible surface.
+The first milestone proved the boring but necessary path: config, storage, and
+feed parsing.
 
-- Cargo workspace, three crates, minimal placeholders.
-- Config loader: `config.toml` into a typed struct via serde.
-- SQLite schema and storage layer with `rusqlite`.
-- `feedfold add <url>` CLI: parses a feed via `feed-rs` and prints
-  normalized entries to stdout.
+- Cargo workspace and crate boundaries.
+- Typed config loading from TOML.
+- SQLite storage layer with migrations.
+- `feedfold add <url>` for fetching and persisting a feed.
 
-**Done when:** you can point the CLI at any RSS or Atom URL and see parsed
-entries on stdout.
+**Done when:** any RSS or Atom feed can be fetched, normalized, and stored.
 
-## Phase 1: Daemon and TUI home view (done)
+## Phase 1: Daemon and first reading flow (done)
 
-- Generic `RssAdapter` implementing `SourceAdapter`.
-- Background daemon polling all sources on a schedule.
-- Minimal ratatui TUI with a single "Home" view.
-- `RecencyRanker` doing simple newest-first top-N selection.
-- Read / unread state and basic navigation (`j/k/enter/q`).
-- Hard-refresh key that refetches everything.
+This phase turned feedfold from a parser into a reader.
 
-**Done when:** you can add a feed, let the daemon fetch it, and read the
-top entries in a responsive terminal UI.
+- Background polling runtime.
+- Minimal TUI home view.
+- Read / unread state.
+- Recency ranking and top-N selection.
+- Fast keyboard navigation and refresh.
 
-## Phase 2: YouTube and thumbnails (done)
+**Done when:** you can leave the app alone, come back, and scan a sane home
+screen instead of a raw firehose.
 
-- `YoutubeAdapter` that wraps `RssAdapter` and enriches with YouTube Data
-  API v3 (batched `videos.list` calls).
-- `PopularityRanker` using enrichment data.
-- Kitty-protocol thumbnails via `viuer`, with text fallback for other
-  terminals.
-- Per-source ranking mode override in config.
+## Phase 2: YouTube as a first-class source (done)
 
-**Done when:** YouTube subscriptions show up alongside blog posts, sorted
-by popularity, with thumbnails on kitty.
+The project became more useful once blogs and channels could live together.
 
-## Phase 3: Ratings, overflow, and search (done)
+- `YoutubeAdapter` built on top of the generic RSS path.
+- YouTube Data API enrichment for duration, views, and thumbnails.
+- Popularity ranking mode.
+- Thumbnail rendering with graceful fallback.
 
-- 1-5 star rating keybind.
-- "Viewed" view with today's counter.
-- "Overflow" view for unviewed entries that didn't make top-N.
+**Done when:** YouTube subscriptions sit naturally beside regular feeds instead
+of feeling bolted on.
+
+## Phase 3: Memory and triage tools (done)
+
+This phase made the reader better at handling real-world volume.
+
+- 1-5 star ratings.
+- Viewed view with today's count.
+- Overflow view for unviewed items outside the top-N.
 - Starring.
-- SQLite FTS5 search over title and summary.
+- Full-text search over title and summary.
 
-**Done when:** the full three-view TUI (home / viewed / overflow) works
-with ratings and search.
+**Done when:** the app supports both quick scanning and intentional digging.
 
-## Phase 4: AI ranking (done)
+## Phase 4: Personal ranking (done)
 
-- `ClaudeRanker` using the Anthropic API.
-- Interests prompt loaded from config.
-- Rating history fed in as context.
-- Runtime config switch between recency / popularity / claude.
+This phase made the home screen adapt to the user instead of only the feed.
 
-**Done when:** switching `ranking.mode = "claude"` produces noticeably
-better top-N picks that reflect rated history.
+- Claude ranking mode.
+- Interests prompt from config.
+- Rating history fed back into ranking context.
+- Runtime fallback to simpler ranking when needed.
 
-## Phase 5: Onboarding polish (in progress)
+**Done when:** the home view starts to reflect taste, not just recency.
 
-The binary is usable, but getting your existing subscriptions into it
-should not require one shell invocation per feed. This phase smooths
-the first-run experience.
+## Phase 5: Onboarding and source management (done)
 
-- [x] 5.1 `feedfold import <opml>` bulk subscription import.
-- [x] 5.2 `feedfold list` source inspector.
-- [ ] 5.3 `feedfold remove <id|url>` to drop a tracked source.
-- [ ] 5.4 `feedfold export` to write OPML back out for backup.
-- [ ] 5.5 First-run bootstrap: if no config exists, write the example
-  to `~/.config/feedfold/config.toml` and point the user at it.
+This phase removed the "one source at a time" pain.
 
-**Done when:** a new user can go from zero to a working feed list in
-one OPML import and then manage their sources without editing SQL or
-the TOML file.
+- OPML import.
+- Source listing.
+- Source removal.
+- OPML export.
+- First-run config bootstrap.
 
-## Phase 6: Persistent daemon (planned)
+**Done when:** a new user can move an existing subscription set into feedfold
+without manual database edits or hand-written SQL.
 
-Today you have to remember to run `feedfoldd` in a terminal. This phase
-makes the daemon a real background service.
+## Phase 6: Persistent background updates (done)
 
-- [ ] 6.1 `feedfold daemon install` writing a `launchd` plist on macOS.
-- [ ] 6.2 `feedfold daemon status` / `start` / `stop` wrappers.
-- [ ] 6.3 Optional log rotation and a pid file so the TUI can show
-  "daemon up since X".
+This phase made the product feel more like a dependable daily tool.
 
-**Done when:** the daemon survives reboots without manual intervention
-and the TUI can see whether it is alive.
+- `feedfold daemon install`.
+- `feedfold daemon status`, `start`, and `stop`.
+- `launchd` plist generation on macOS.
+- PID tracking and daemon status in the UI.
+- Automatic daemon start when opening the TUI on macOS.
 
-## Phase 7: Deeper integrations (planned)
+**Done when:** feedfold keeps itself warm in the background instead of relying
+on the user to remember another terminal command.
 
-- [ ] 7.1 OAuth-based YouTube subscription import: pull the signed-in
-  user's channel list and generate source entries automatically.
-- [ ] 7.2 Source groups and saved filters (for example "morning" vs
-  "deep work" feed sets).
-- [ ] 7.3 Local-model ranker (Ollama) as an alternative to Claude for
-  fully offline ranking.
-- [ ] 7.4 Semantic search over summaries, built on top of FTS5.
+## Phase 7: Deeper integrations (next)
 
-## Bucket list (deferred)
+These are the most valuable next steps because they improve adoption and make
+the ranking model more flexible.
 
-- Web-hosted read-only mirror of the current top-N.
-- Mobile companion for starring and rating on the go.
-- Podcast adapter with audio enclosure playback.
-- Newsletter adapter (Mailgun / Postmark inbound).
+- [ ] 7.1 OAuth-based YouTube subscription import.
+- [ ] 7.2 Source groups and saved filters.
+- [ ] 7.3 Local-model ranking via Ollama.
+- [ ] 7.4 Semantic search over summaries.
+
+**Done when:** setup gets faster, filtering gets more intentional, and users
+can choose between hosted AI and local ranking.
+
+## Bucket list
+
+Interesting ideas that fit the product, but are not yet on the critical path:
+
+- Web-hosted read-only mirror of your current top-N.
+- Mobile companion for starring and rating.
+- Podcast adapter with enclosure playback support.
+- Newsletter adapter for inbound email feeds.
