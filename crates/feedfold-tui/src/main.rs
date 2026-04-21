@@ -24,7 +24,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap},
     Terminal,
 };
 use viuer::KittySupport;
@@ -2216,6 +2216,25 @@ fn safe_truncate(s: &str, max_width: usize) -> String {
     result
 }
 
+fn entry_title_style(state: EntryState) -> Style {
+    match state {
+        EntryState::New => Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+        EntryState::Viewed => Style::default().fg(Color::DarkGray),
+        EntryState::Ignored => Style::default().fg(Color::DarkGray),
+        EntryState::Starred => Style::default().fg(Color::Gray),
+    }
+}
+
+fn entry_source_style(state: EntryState) -> Style {
+    match state {
+        EntryState::New | EntryState::Starred => Style::default().fg(Color::Cyan),
+        EntryState::Viewed => Style::default().fg(Color::Gray),
+        EntryState::Ignored => Style::default().fg(Color::DarkGray),
+    }
+}
+
 fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let outer = f.area();
     let main_and_bar = Layout::default()
@@ -2255,13 +2274,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     ListItem::new(line)
                 }
                 ChannelRow::Entry(entry) => {
-                    let title_style = if entry.state == EntryState::New {
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Gray)
-                    };
+                    let title_style = entry_title_style(entry.state);
                     let star = if entry.state == EntryState::Starred {
                         Span::styled("* ", Style::default().fg(Color::Yellow))
                     } else {
@@ -2291,24 +2304,21 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     .author
                     .clone()
                     .unwrap_or_else(|| "Unknown".to_string());
-                let title_style = if entry.state == EntryState::New {
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
+                let title_style = entry_title_style(entry.state);
+                let source_style = entry_source_style(entry.state);
+                let star_width = if entry.state == EntryState::Starred {
+                    2
                 } else {
-                    Style::default().fg(Color::Gray)
-                };
-                let star = if entry.state == EntryState::Starred {
-                    Span::styled("* ", Style::default().fg(Color::Yellow))
-                } else {
-                    Span::raw("  ")
+                    0
                 };
 
                 use unicode_width::UnicodeWidthStr;
                 let source_str = format!("{source}  ");
                 let source_width = source_str.width();
-                let max_title_width =
-                    list_area.width.saturating_sub(6 + source_width as u16) as usize;
+                let max_title_width = list_area
+                    .width
+                    .saturating_sub(4 + source_width as u16 + star_width)
+                    as usize;
                 let truncated_title = safe_truncate(&entry.title, max_title_width);
 
                 let duration_label = entry_duration_label(entry, &app.entry_enrichments);
@@ -2318,11 +2328,13 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     Span::styled(truncated_title, title_style)
                 };
 
-                let line = Line::from(vec![
-                    star,
-                    Span::styled(source_str, Style::default().fg(Color::Cyan)),
-                    title_span,
-                ]);
+                let mut spans = Vec::with_capacity(3);
+                if entry.state == EntryState::Starred {
+                    spans.push(Span::styled("* ", Style::default().fg(Color::Yellow)));
+                }
+                spans.push(Span::styled(source_str, source_style));
+                spans.push(title_span);
+                let line = Line::from(spans);
                 ListItem::new(line)
             })
             .collect()
@@ -2354,7 +2366,8 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 .title_top(refresh_title),
         )
         .highlight_style(Style::default().bg(Color::DarkGray))
-        .highlight_symbol(" > ");
+        .highlight_symbol("")
+        .highlight_spacing(HighlightSpacing::Never);
 
     app.list_viewport_height = list_area.height.saturating_sub(2);
     f.render_stateful_widget(items_list, list_area, &mut app.state);
